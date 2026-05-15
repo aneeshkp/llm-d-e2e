@@ -1,0 +1,33 @@
+name: single-gpu-smoke
+description: "1 GPU fast smoke test (default: Qwen/Qwen3-0.6B)"
+model:
+  name: Qwen/Qwen3-0.6B
+  uri: hf://Qwen/Qwen3-0.6B
+  displayName: qwen3-0.6b-single
+  category: single-node-gpu
+  cache:
+    enabled: true
+    storageSize: 10Gi
+    keepPVC: true
+    timeout: 15m
+deployment:
+  manifestPath: single-gpu-smoke.yaml
+  replicas: 1
+  readyTimeout: 10m
+  resources:
+    cpu: "2"
+    memory: 8Gi
+    gpus: 1
+    rdma: false
+validation:
+  healthEndpoint: /health
+  healthPort: 8000
+  healthScheme: HTTPS
+  inferenceCheck: true
+  testPrompts:
+    - "What is 2+2?"
+  expectedCodes: [200]
+  timeout: 2m
+  retryAttempts: 3
+  retryInterval: 15s
+cleanup: true

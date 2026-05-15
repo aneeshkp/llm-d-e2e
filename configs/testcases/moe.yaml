@@ -1,0 +1,41 @@
+name: moe
+description: "MoE with DP/EP, 8 GPUs, RDMA/RoCE (default: deepseek-ai/DeepSeek-R1-0528)"
+model:
+  name: deepseek-ai/DeepSeek-R1-0528
+  uri: hf://deepseek-ai/DeepSeek-R1-0528
+  displayName: deepseek-r1-0528
+  category: deepseek
+  cache:
+    enabled: true
+    storageSize: 500Gi
+    keepPVC: true
+deployment:
+  manifestPath: moe.yaml
+  replicas: 1
+  serviceAccount: hfsa
+  readyTimeout: 90m
+  networkAttachment: roce-p2
+  worker: true
+  resources:
+    cpu: "128"
+    memory: 512Gi
+    gpus: 8
+    ephemeralStorage: 800Gi
+    rdma: true
+  parallelism:
+    data: 32
+    dataLocal: 8
+    expert: true
+    tensor: 1
+validation:
+  healthEndpoint: /health
+  healthPort: 8000
+  healthScheme: HTTPS
+  inferenceCheck: true
+  testPrompts:
+    - "What is expert parallelism in MoE models?"
+  expectedCodes: [200]
+  timeout: 5m
+  retryAttempts: 3
+  retryInterval: 30s
+cleanup: true

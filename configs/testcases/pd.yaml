@@ -1,0 +1,47 @@
+name: pd
+description: "P/D disaggregation, 2 prefill + 1 decode (default: Qwen/Qwen3-0.6B)"
+model:
+  name: Qwen/Qwen3-0.6B
+  uri: hf://Qwen/Qwen3-0.6B
+  displayName: qwen3-0.6b-pd
+  category: multi-node-gpu
+  cache:
+    enabled: true
+    storageSize: 10Gi
+    keepPVC: true
+    timeout: 15m
+deployment:
+  manifestPath: pd.yaml
+  replicas: 1
+  readyTimeout: 15m
+  resources:
+    cpu: "4"
+    memory: 32Gi
+    gpus: 1
+    rdma: false
+  prefill:
+    replicas: 2
+    resources:
+      cpu: "4"
+      memory: 32Gi
+      gpus: 1
+      rdma: false
+validation:
+  healthEndpoint: /health
+  healthPort: 8000
+  healthScheme: HTTPS
+  inferenceCheck: true
+  testPrompts:
+    - "What is prefill decode disaggregation?"
+    - "Explain KV cache transfer."
+  expectedCodes: [200]
+  timeout: 2m
+  retryAttempts: 3
+  retryInterval: 15s
+  metricsCheck:
+    enabled: true
+    checkVLLM: true
+    checkPD: true
+    checkNIXL: true
+    checkScheduler: true
+cleanup: true

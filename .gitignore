@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+reports/*.json
+reports/*.html
+deploy/manifests/*.yaml
+.work/

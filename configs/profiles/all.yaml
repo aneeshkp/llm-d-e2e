@@ -1,0 +1,11 @@
+name: all
+description: "All conformance tests — scheduler, no-scheduler, cache-aware, P/D"
+platform: any
+testCases:
+  - single-gpu
+  - single-gpu-no-scheduler
+  - cache-aware
+  - pd
+  - pd-cache-aware
+parallel: false
+timeout: 120m

@@ -1,0 +1,47 @@
+name: cache-aware
+description: "2 GPUs with prefix KV cache-aware routing, 2 replicas (default: Qwen/Qwen3-0.6B)"
+model:
+  name: Qwen/Qwen3-0.6B
+  uri: hf://Qwen/Qwen3-0.6B
+  displayName: qwen3-0.6b-cache-aware
+  category: cache-aware
+  cache:
+    enabled: true
+    storageSize: 100Gi
+    keepPVC: true
+    timeout: 15m
+deployment:
+  manifestPath: cache-aware.yaml
+  replicas: 2
+  readyTimeout: 15m
+  resources:
+    cpu: "4"
+    memory: 32Gi
+    gpus: 1
+    rdma: false
+validation:
+  healthEndpoint: /health
+  healthPort: 8000
+  healthScheme: HTTPS
+  inferenceCheck: true
+  chatPrompts:
+    # Request 1: long system prefix — gets cached by vLLM
+    - system: "You are a helpful AI assistant specializing in distributed systems, cloud computing, and Kubernetes. You have deep expertise in GPU workloads, model serving, KV cache optimization, and inference pipeline architectures. Always provide detailed, technical answers with examples."
+      user: "What is prefix caching in LLM inference?"
+    # Request 2: same prefix, different question — should trigger a prefix cache hit
+    - system: "You are a helpful AI assistant specializing in distributed systems, cloud computing, and Kubernetes. You have deep expertise in GPU workloads, model serving, KV cache optimization, and inference pipeline architectures. Always provide detailed, technical answers with examples."
+      user: "How does KV cache-aware routing improve latency?"
+    # Request 3: same prefix again — confirms cache hit pattern
+    - system: "You are a helpful AI assistant specializing in distributed systems, cloud computing, and Kubernetes. You have deep expertise in GPU workloads, model serving, KV cache optimization, and inference pipeline architectures. Always provide detailed, technical answers with examples."
+      user: "Explain the difference between prefix caching and full KV cache reuse."
+  expectedCodes: [200]
+  timeout: 2m
+  retryAttempts: 3
+  retryInterval: 15s
+  metricsCheck:
+    enabled: true
+    checkVLLM: true
+    checkEPP: true
+    checkPrefixCache: true
+    checkScheduler: true
+cleanup: true

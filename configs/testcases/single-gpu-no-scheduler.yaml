@@ -1,0 +1,33 @@
+name: single-gpu-no-scheduler
+description: "1 GPU without scheduler, K8s native routing (default: Qwen/Qwen3-0.6B)"
+model:
+  name: Qwen/Qwen3-0.6B
+  uri: hf://Qwen/Qwen3-0.6B
+  displayName: qwen3-0.6b-no-scheduler
+  category: single-node-gpu
+  cache:
+    enabled: true
+    storageSize: 100Gi
+    keepPVC: true
+    timeout: 15m
+deployment:
+  manifestPath: single-gpu-no-scheduler.yaml
+  replicas: 3
+  readyTimeout: 15m
+  resources:
+    cpu: "4"
+    memory: 32Gi
+    gpus: 1
+    rdma: false
+validation:
+  healthEndpoint: /health
+  healthPort: 8000
+  healthScheme: HTTPS
+  inferenceCheck: true
+  testPrompts:
+    - "What is Kubernetes?"
+  expectedCodes: [200]
+  timeout: 2m
+  retryAttempts: 3
+  retryInterval: 15s
+cleanup: true

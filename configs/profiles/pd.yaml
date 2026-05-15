@@ -1,0 +1,7 @@
+name: pd
+description: "P/D disaggregation — 2 prefill + 1 decode"
+platform: any
+testCases:
+  - pd
+parallel: false
+timeout: 30m

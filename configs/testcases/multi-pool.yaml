@@ -1,0 +1,45 @@
+name: multi-pool
+description: "Multiple InferencePools — validates VirtualService merge across pools (OSSM-12585)"
+model:
+  name: Qwen/Qwen3-0.6B
+  uri: hf://Qwen/Qwen3-0.6B
+  displayName: multi-pool
+  category: multi-pool
+  cache:
+    enabled: true
+    storageSize: 10Gi
+    keepPVC: true
+    timeout: 15m
+deployment:
+  manifestPath: multi-pool.yaml
+  replicas: 1
+  readyTimeout: 15m
+  resources:
+    cpu: "4"
+    memory: 32Gi
+    gpus: 2
+    rdma: false
+validation:
+  healthEndpoint: /health
+  healthPort: 8000
+  healthScheme: HTTPS
+  inferenceCheck: true
+  testPrompts:
+    - "What is Kubernetes?"
+  expectedCodes: [200]
+  timeout: 2m
+  retryAttempts: 3
+  retryInterval: 15s
+  metricsCheck:
+    enabled: true
+    checkVLLM: true
+    checkEPP: true
+    checkScheduler: true
+  multiPool:
+    enabled: true
+    pools:
+      - name: multi-pool-a
+        prompt: "What is Kubernetes?"
+      - name: multi-pool-b
+        prompt: "What is containerization?"
+cleanup: true

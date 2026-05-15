@@ -1,0 +1,7 @@
+name: smoke
+description: "Quick smoke test — smallest model, fastest"
+platform: any
+testCases:
+  - single-gpu-smoke
+parallel: false
+timeout: 30m

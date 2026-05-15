@@ -1,0 +1,35 @@
+[project]
+name = "llm-d-e2e"
+version = "0.1.0"
+description = "End-to-end conformance tests for llm-d / KServe LLMInferenceService"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "pyyaml>=6.0",
+    "pytest>=8.0",
+    "pytest-ordering>=0.6",
+    "pytest-timeout>=2.3",
+    "pytest-html>=4.1",
+]
+
+[project.scripts]
+llm-d-e2e = "conformance.cli:main"
+
+[project.optional-dependencies]
+dev = ["ruff>=0.8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/conformance"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v -s --tb=short"
+timeout = 21600
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"

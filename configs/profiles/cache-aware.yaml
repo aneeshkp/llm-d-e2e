@@ -1,0 +1,7 @@
+name: cache-aware
+description: "KV cache-aware routing tests"
+platform: any
+testCases:
+  - cache-aware
+parallel: false
+timeout: 30m

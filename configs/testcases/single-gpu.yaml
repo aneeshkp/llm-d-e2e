@@ -1,0 +1,39 @@
+name: single-gpu
+description: "1 GPU with scheduler (default: Qwen/Qwen3-0.6B)"
+model:
+  name: Qwen/Qwen3-0.6B
+  uri: hf://Qwen/Qwen3-0.6B
+  displayName: qwen3-0.6b-single-gpu
+  category: single-node-gpu
+  cache:
+    enabled: true
+    storageSize: 10Gi
+    keepPVC: true
+    timeout: 15m
+deployment:
+  manifestPath: single-gpu.yaml
+  replicas: 1
+  readyTimeout: 15m
+  resources:
+    cpu: "4"
+    memory: 32Gi
+    gpus: 1
+    rdma: false
+validation:
+  healthEndpoint: /health
+  healthPort: 8000
+  healthScheme: HTTPS
+  inferenceCheck: true
+  testPrompts:
+    - "What is Kubernetes?"
+    - "Explain containerization."
+  expectedCodes: [200]
+  timeout: 2m
+  retryAttempts: 3
+  retryInterval: 15s
+  metricsCheck:
+    enabled: true
+    checkVLLM: true
+    checkEPP: true
+    checkScheduler: true
+cleanup: true

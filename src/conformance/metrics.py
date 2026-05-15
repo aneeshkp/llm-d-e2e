@@ -1,0 +1,246 @@
+"""Prometheus metrics scraping and validation for vLLM, EPP, and scheduler."""
+
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass, field
+
+log = logging.getLogger(__name__)
+
+# vLLM metrics
+VLLM_REQUEST_SUCCESS = "vllm:request_success_total"
+VLLM_PROMPT_TOKENS = "vllm:prompt_tokens_total"
+VLLM_GEN_TOKENS = "vllm:generation_tokens_total"
+VLLM_GPU_CACHE = "vllm:gpu_cache_usage_perc"
+VLLM_PREEMPTIONS = "vllm:num_preemptions_total"
+VLLM_PREFIX_QUERIES = "vllm:prefix_cache_queries"
+VLLM_PREFIX_QUERIES_ALT = "vllm:prefix_cache_queries_total"
+VLLM_PREFIX_HITS = "vllm:prefix_cache_hits"
+VLLM_PREFIX_HITS_ALT = "vllm:prefix_cache_hits_total"
+
+# NIXL metrics
+NIXL_TRANSFERS = "nixl:kv_transfer_count_total"
+NIXL_FAILURES = "nixl:kv_transfer_failures_total"
+
+# EPP / Scheduler metrics
+SCHED_E2E = "inference_extension_scheduler_e2e_duration_seconds_count"
+SCHED_REQUEST_TOTAL = "inference_objective_request_total"
+SCHED_REQUEST_ERROR = "inference_objective_request_error_total"
+POOL_READY_PODS = "inference_pool_ready_pods"
+PREFIX_INDEXER_SIZE = "inference_extension_prefix_indexer_size"
+
+# Label patterns for pod discovery
+WORKLOAD_LABEL = "app.kubernetes.io/name={name},app.kubernetes.io/component=llminferenceservice-workload"
+PREFILL_LABEL = "app.kubernetes.io/name={name},app.kubernetes.io/component=llminferenceservice-workload-prefill"
+EPP_LABELS = [
+    "app.kubernetes.io/name={name}-epp",
+    "app.kubernetes.io/component=endpoint-picker,app.kubernetes.io/name={name}",
+    "app.kubernetes.io/component=router-scheduler,app.kubernetes.io/name={name}",
+    "kserve.io/component=scheduler,app.kubernetes.io/name={name}",
+]
+
+
+@dataclass
+class Metric:
+    name: str
+    labels: dict[str, str] = field(default_factory=dict)
+    value: float = 0.0
+
+
+@dataclass
+class ScrapeResult:
+    source: str
+    metrics: dict[str, list[Metric]] = field(default_factory=dict)
+
+    def get(self, name: str, fallback: str = "") -> float | None:
+        for key in (name, fallback) if fallback else (name,):
+            if key in self.metrics:
+                values = self.metrics[key]
+                if values:
+                    return sum(m.value for m in values)
+        return None
+
+    def has(self, name: str, fallback: str = "") -> bool:
+        return self.get(name, fallback) is not None
+
+
+@dataclass
+class CheckResult:
+    name: str
+    metric: str
+    source: str
+    value: float
+    passed: bool
+    message: str
+
+
+def parse_prometheus(text: str) -> dict[str, list[Metric]]:
+    """Parse Prometheus text exposition format into indexed metrics."""
+    result: dict[str, list[Metric]] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = re.match(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)\{?(.*?)\}?\s+([\d.eE+\-]+|NaN|Inf|-Inf)$", line)
+        if not match:
+            match = re.match(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)\s+([\d.eE+\-]+|NaN|Inf|-Inf)$", line)
+            if match:
+                name, val = match.group(1), match.group(2)
+                try:
+                    m = Metric(name=name, value=float(val))
+                except ValueError:
+                    continue
+                result.setdefault(name, []).append(m)
+            continue
+        name, label_str, val = match.group(1), match.group(2), match.group(3)
+        labels = {}
+        if label_str:
+            for lm in re.finditer(r'(\w+)="([^"]*)"', label_str):
+                labels[lm.group(1)] = lm.group(2)
+        try:
+            m = Metric(name=name, labels=labels, value=float(val))
+        except ValueError:
+            continue
+        result.setdefault(name, []).append(m)
+    return result
+
+
+class Scraper:
+    """Scrapes Prometheus metrics from pods via kubectl exec."""
+
+    def __init__(self, kubectl_fn, namespace: str):
+        self._kubectl = kubectl_fn
+        self.namespace = namespace
+
+    def scrape_pod(self, pod: str, port: int = 8000) -> ScrapeResult:
+        script = (
+            f"import urllib.request,ssl; "
+            f"print(urllib.request.urlopen('https://localhost:{port}/metrics',"
+            f"context=ssl._create_unverified_context()).read().decode())"
+        )
+        try:
+            text = self._kubectl(
+                "exec", pod, "-n", self.namespace, "--",
+                "python3", "-c", script,
+            )
+        except RuntimeError:
+            text = self._kubectl(
+                "exec", pod, "-n", self.namespace, "--",
+                "wget", "--no-check-certificate", "-qO-",
+                f"https://localhost:{port}/metrics",
+            )
+        return ScrapeResult(source=pod, metrics=parse_prometheus(text))
+
+    def scrape_pods_by_label(self, label: str, port: int = 8000) -> list[ScrapeResult]:
+        output = self._kubectl(
+            "get", "pods", "-n", self.namespace, "-l", label,
+            "-o", "jsonpath={.items[*].metadata.name}",
+        )
+        pods = output.split() if output else []
+        results = []
+        for pod in pods:
+            try:
+                results.append(self.scrape_pod(pod, port))
+            except RuntimeError as e:
+                log.warning("Failed to scrape %s: %s", pod, e)
+        return results
+
+    def scrape_vllm(self, name: str) -> list[ScrapeResult]:
+        label = WORKLOAD_LABEL.format(name=name)
+        return self.scrape_pods_by_label(label, port=8000)
+
+    def scrape_prefill(self, name: str) -> list[ScrapeResult]:
+        label = PREFILL_LABEL.format(name=name)
+        return self.scrape_pods_by_label(label, port=8000)
+
+    def scrape_epp(self, name: str) -> list[ScrapeResult]:
+        for label_tmpl in EPP_LABELS:
+            label = label_tmpl.format(name=name)
+            results = self.scrape_pods_by_label(label, port=9090)
+            if results:
+                return results
+        return []
+
+
+def validate_vllm_basic(results: list[ScrapeResult]) -> list[CheckResult]:
+    checks = []
+    for r in results:
+        val = r.get(VLLM_REQUEST_SUCCESS)
+        checks.append(CheckResult(
+            name="request_success", metric=VLLM_REQUEST_SUCCESS, source=r.source,
+            value=val or 0, passed=val is not None and val > 0,
+            message=f"request_success={val}" if val else "metric not found",
+        ))
+    return checks
+
+
+def validate_cache_aware(vllm: list[ScrapeResult], epp: list[ScrapeResult]) -> list[CheckResult]:
+    checks = validate_vllm_basic(vllm)
+    for r in vllm:
+        queries = r.get(VLLM_PREFIX_QUERIES, VLLM_PREFIX_QUERIES_ALT)
+        hits = r.get(VLLM_PREFIX_HITS, VLLM_PREFIX_HITS_ALT)
+        checks.append(CheckResult(
+            name="prefix_queries", metric=VLLM_PREFIX_QUERIES, source=r.source,
+            value=queries or 0, passed=queries is not None and queries > 0,
+            message=f"prefix_queries={queries}",
+        ))
+        checks.append(CheckResult(
+            name="prefix_hits", metric=VLLM_PREFIX_HITS, source=r.source,
+            value=hits or 0, passed=hits is not None and hits > 0,
+            message=f"prefix_hits={hits}",
+        ))
+        if queries and hits:
+            rate = hits / queries * 100
+            checks.append(CheckResult(
+                name="prefix_hit_rate", metric="prefix_cache_hit_rate", source=r.source,
+                value=rate, passed=rate > 0,
+                message=f"hit_rate={rate:.1f}%",
+            ))
+    return checks
+
+
+def validate_pd(vllm: list[ScrapeResult]) -> list[CheckResult]:
+    checks = validate_vllm_basic(vllm)
+    for r in vllm:
+        for metric, label in [(VLLM_PROMPT_TOKENS, "prompt_tokens"), (VLLM_GEN_TOKENS, "gen_tokens")]:
+            val = r.get(metric)
+            checks.append(CheckResult(
+                name=label, metric=metric, source=r.source,
+                value=val or 0, passed=val is not None and val > 0,
+                message=f"{label}={val}",
+            ))
+        preempt = r.get(VLLM_PREEMPTIONS)
+        if preempt is not None:
+            checks.append(CheckResult(
+                name="preemptions", metric=VLLM_PREEMPTIONS, source=r.source,
+                value=preempt, passed=preempt < 10,
+                message=f"preemptions={preempt}",
+            ))
+    return checks
+
+
+def validate_scheduler(epp: list[ScrapeResult]) -> list[CheckResult]:
+    checks = []
+    for r in epp:
+        e2e = r.get(SCHED_E2E)
+        checks.append(CheckResult(
+            name="scheduler_e2e", metric=SCHED_E2E, source=r.source,
+            value=e2e or 0, passed=e2e is not None and e2e > 0,
+            message=f"scheduler_e2e_count={e2e}",
+        ))
+        errors = r.get(SCHED_REQUEST_ERROR)
+        if errors is not None:
+            checks.append(CheckResult(
+                name="request_errors", metric=SCHED_REQUEST_ERROR, source=r.source,
+                value=errors, passed=errors == 0,
+                message=f"request_errors={errors}",
+            ))
+        pods = r.get(POOL_READY_PODS)
+        if pods is not None:
+            checks.append(CheckResult(
+                name="ready_pods", metric=POOL_READY_PODS, source=r.source,
+                value=pods, passed=pods > 0,
+                message=f"ready_pods={pods}",
+            ))
+    return checks
