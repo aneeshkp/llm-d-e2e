@@ -4,42 +4,99 @@ End-to-end conformance tests for [llm-d](https://github.com/llm-d) / KServe `LLM
 
 Python + pytest rewrite of the [Go/Ginkgo conformance framework](https://github.com/aneeshkp/llm-d-conformance-test). See that project's [architecture docs](https://github.com/aneeshkp/llm-d-conformance-test/blob/main/docs/architecture.md) for detailed diagrams, test topologies, and metrics coverage.
 
+## Prerequisites
+
+- Python 3.11+
+- [uv](https://docs.astral.sh/uv/) — fast Python package manager
+- `kubectl` configured with cluster access
+- Cluster with `LLMInferenceService` CRD installed (RHAI or KServe)
+
+Install uv if you don't have it:
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+## Setup
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/aneeshkp/llm-d-e2e.git
+cd llm-d-e2e
+
+# 2. Install dependencies
+uv sync
+
+# 3. Clone test manifests (LLMInferenceService YAMLs)
+uv run llm-d-e2e --setup main          # latest
+uv run llm-d-e2e --setup 3.4-stable    # specific release
+
+# 4. (Optional) Set up a shortcut
+alias e2e='uv run llm-d-e2e'
+```
+
 ## Quick Start
 
 ```bash
-# Install
-uv sync
-
-# Setup manifests
-uv run llm-d-e2e --setup main
+# List available tests and profiles
+e2e --list-testcases
+e2e --list-profiles
 
 # Run smoke test
-uv run llm-d-e2e -t single-gpu-smoke
+e2e -t single-gpu-smoke
 
 # Run all conformance tests
-uv run llm-d-e2e -p configs/profiles/all.yaml
-
-# List available tests
-uv run llm-d-e2e --list-testcases
-uv run llm-d-e2e --list-profiles
+e2e -p configs/profiles/all.yaml
 ```
 
 ## Usage
 
 ```bash
 # Single test case
-uv run llm-d-e2e -t single-gpu
+e2e -t single-gpu
 
 # Multiple test cases
-uv run llm-d-e2e -t single-gpu,cache-aware
+e2e -t single-gpu,cache-aware
 
-# With options
-uv run llm-d-e2e -t single-gpu --nocleanup          # keep resources for debugging
-uv run llm-d-e2e -t single-gpu --model-source pvc    # use pre-cached model
-uv run llm-d-e2e -t single-gpu --mock <image>        # mock vLLM (no GPU)
-uv run llm-d-e2e -t single-gpu -v -x                 # verbose, fail-fast
-uv run llm-d-e2e -t single-gpu --html report.html    # HTML report
+# Keep resources after test (for debugging)
+e2e -t single-gpu --nocleanup
+
+# Use pre-cached model from PVC
+e2e -t single-gpu --model-source pvc
+
+# Mock vLLM (no GPU needed)
+e2e -t single-gpu --mock ghcr.io/aneeshkp/vllm-mock:latest
+
+# Verbose output, stop on first failure
+e2e -t single-gpu -v -x
+
+# Generate HTML report
+e2e -t single-gpu --html report.html
+
+# Target a specific cluster
+e2e -t single-gpu --kubeconfig ~/.kube/config --namespace my-test-ns
+
+# Validate an existing deployment (no deploy/cleanup)
+e2e -t single-gpu --mode discover --endpoint http://my-service:8000
 ```
+
+## Testing an Existing Deployment
+
+If you already have an LLMInferenceService running and just want to validate it (health, inference, metrics) without deploying or cleaning up:
+
+```bash
+# Get the service URL
+kubectl get llminferenceservice -n my-namespace
+# NAME         URL                                    READY
+# my-model     http://gateway.example.com/ns/model    True
+
+# Run validation against it
+e2e -t single-gpu --mode discover --namespace my-namespace
+
+# Or specify the endpoint directly
+e2e -t single-gpu --mode discover --endpoint http://gateway.example.com/ns/model
+```
+
+This skips the deploy and cleanup phases — only runs health, models, inference, and metrics checks.
 
 ## Test Cases
 
@@ -78,4 +135,7 @@ uv run pytest tests/test_smoke.py -v
 
 # Lint
 uv run ruff check src/ tests/
+
+# Format
+uv run ruff format src/ tests/
 ```
