@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+DEFAULT_MOCK_IMAGE = "ghcr.io/llm-d/llm-d-inference-sim:latest"
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -29,7 +31,11 @@ def main():
     parser.add_argument("--model-source", default="hf", choices=["hf", "pvc"], help="Model source")
     parser.add_argument("--model", default="", help="Override model name")
     parser.add_argument("--endpoint", default="", help="Service URL for discover mode")
-    parser.add_argument("--mock", default="", help="Mock vLLM image (no GPU needed)")
+    parser.add_argument(
+        "--mock", default="", nargs="?", const=DEFAULT_MOCK_IMAGE,
+        help=f"Use simulator image (no GPU needed). Default: {DEFAULT_MOCK_IMAGE}",
+    )
+    parser.add_argument("--render-image", default="", help="vLLM CPU image for tokenizer render sidecar (used with --mock)")
 
     # Auth
     parser.add_argument("--pull-secret", default="", help="Pull secret name")
@@ -84,6 +90,7 @@ def main():
         "model": "--model",
         "endpoint": "--endpoint",
         "mock": "--mock",
+        "render_image": "--render-image",
         "pull_secret": "--pull-secret",
         "bearer_token": "--bearer-token",
         "storage_class": "--storage-class",

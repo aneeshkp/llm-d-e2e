@@ -41,6 +41,7 @@ class Deployer:
         namespace: str = "llm-conformance-test",
         model_source: str = "hf",
         mock_image: str = "",
+        render_image: str = "",
         pull_secret: str = "",
         disable_auth: bool = False,
         manifest_dir: str = "deploy/manifests",
@@ -50,11 +51,27 @@ class Deployer:
         self.namespace = namespace
         self.model_source = model_source
         self.mock_image = mock_image
+        self._render_image_override = render_image
         self.pull_secret = pull_secret
         self.disable_auth = disable_auth
         self.manifest_dir = Path(manifest_dir)
         self._port_forward_proc: subprocess.Popen | None = None
         self._port_forward_port: int = 0
+        self._render_image_cached: str | None = None
+
+    @property
+    def render_image(self) -> str:
+        if self._render_image_override:
+            return self._render_image_override
+        if self._render_image_cached is None:
+            self._render_image_cached = self._discover_render_image()
+        return self._render_image_cached
+
+    def _discover_render_image(self) -> str:
+        """Return the default render image. Requires vLLM >= 0.19 for 'vllm launch render'."""
+        default = "vllm/vllm-openai-cpu:v0.19.1"
+        log.info("Using render image: %s", default)
+        return default
 
     def kubectl(self, *args: str, check: bool = True) -> str:
         cmd = ["kubectl"]
@@ -72,6 +89,69 @@ class Deployer:
             self.kubectl("get", "namespace", self.namespace, check=True)
         except RuntimeError:
             self.kubectl("create", "namespace", self.namespace)
+
+    def ensure_pull_secret(self, secret_name: str, source_namespaces: list[str] | None = None):
+        """Copy a pull secret into the test namespace if it doesn't already exist."""
+        try:
+            self.kubectl("get", "secret", secret_name, "-n", self.namespace)
+            return
+        except RuntimeError:
+            pass
+        for ns in source_namespaces or ["rhaii", "redhat-ods-applications", "default"]:
+            try:
+                secret_json = self.kubectl("get", "secret", secret_name, "-n", ns, "-o", "json")
+                if not secret_json:
+                    continue
+                secret = json.loads(secret_json)
+                secret["metadata"] = {"name": secret_name, "namespace": self.namespace}
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+                    json.dump(secret, f)
+                    tmp = f.name
+                try:
+                    self.kubectl("apply", "-f", tmp)
+                    log.info("Copied pull secret %s from %s to %s", secret_name, ns, self.namespace)
+                finally:
+                    Path(tmp).unlink(missing_ok=True)
+                return
+            except RuntimeError:
+                continue
+        log.warning("Pull secret %s not found in any source namespace", secret_name)
+
+    @staticmethod
+    def _collect_pull_secrets(manifest: dict) -> list[str]:
+        """Extract all imagePullSecret names referenced in a manifest."""
+        names = set()
+        spec = manifest.get("spec", {})
+        for section_key in ("template", "prefill", "router"):
+            section = spec.get(section_key, {})
+            if isinstance(section, dict):
+                for s in section.get("imagePullSecrets", []):
+                    if s.get("name"):
+                        names.add(s["name"])
+                sub = section.get("scheduler", {}).get("template", {})
+                for s in sub.get("imagePullSecrets", []):
+                    if s.get("name"):
+                        names.add(s["name"])
+        return sorted(names)
+
+    def ensure_gateway_allows_namespace(self):
+        """Patch the inference gateway to allow HTTPRoutes from the test namespace."""
+        try:
+            allowed = self.kubectl(
+                "get", "gateway", "inference-gateway", "-n", "redhat-ods-applications",
+                "-o", "jsonpath={.spec.listeners[0].allowedRoutes.namespaces.from}",
+                check=False,
+            )
+            if allowed == "All":
+                return
+            self.kubectl(
+                "patch", "gateway", "inference-gateway", "-n", "redhat-ods-applications",
+                "--type=json",
+                "-p", '[{"op":"replace","path":"/spec/listeners/0/allowedRoutes/namespaces/from","value":"All"}]',
+            )
+            log.info("Patched inference-gateway to allow routes from all namespaces")
+        except RuntimeError as e:
+            log.warning("Could not patch gateway allowedRoutes: %s", e)
 
     def check_crd_exists(self, crd_name: str) -> bool:
         try:
@@ -103,6 +183,9 @@ class Deployer:
 
         try:
             self.ensure_namespace()
+            for secret_name in self._collect_pull_secrets(manifest):
+                self.ensure_pull_secret(secret_name)
+            self.ensure_gateway_allows_namespace()
             self.kubectl("apply", "-n", self.namespace, "-f", tmp_path)
             result.success = True
         except RuntimeError as e:
@@ -323,13 +406,15 @@ class Deployer:
 
         spec = manifest.get("spec", {})
 
-        if tc.model.uri:
+        if self.mock_image:
+            model = spec.setdefault("model", {})
+            model["name"] = tc.model.name
+            model["uri"] = tc.model.uri
+            self._replace_vllm_image(spec, self.mock_image, tc.model.name)
+        elif tc.model.uri:
             model = spec.setdefault("model", {})
             model["uri"] = tc.model.uri
             model["name"] = tc.model.name
-
-        if self.mock_image:
-            self._replace_vllm_image(spec, self.mock_image)
 
         if self.pull_secret:
             self._inject_pull_secret(spec, self.pull_secret)
@@ -340,12 +425,24 @@ class Deployer:
 
         return manifest
 
-    def _replace_vllm_image(self, spec: dict, image: str):
+    def _replace_vllm_image(self, spec: dict, image: str, model_name: str = ""):
         for template_key in ("template", "prefill"):
             template = spec.get(template_key, {})
             for container in template.get("containers", []):
                 if container.get("name") == "main":
                     container["image"] = image
+                    container["command"] = ["/app/llm-d-inference-sim"]
+                    sim_model = "sim-model"
+                    container["args"] = [
+                        "--model", sim_model,
+                        "--served-model-name", model_name or sim_model,
+                        "--port", "8000",
+                        "--self-signed-certs",
+                        "--mode", "random",
+                    ]
+                    resources = container.get("resources", {})
+                    for section in ("limits", "requests"):
+                        resources.get(section, {}).pop("nvidia.com/gpu", None)
 
     def _inject_pull_secret(self, spec: dict, secret_name: str):
         for template_key in ("template", "prefill"):

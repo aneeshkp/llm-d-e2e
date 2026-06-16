@@ -63,8 +63,8 @@ e2e -t single-gpu --nocleanup
 # Use pre-cached model from PVC
 e2e -t single-gpu --model-source pvc
 
-# Mock vLLM (no GPU needed)
-e2e -t single-gpu --mock ghcr.io/aneeshkp/vllm-mock:latest
+# Simulate vLLM with llm-d-inference-sim (no GPU needed)
+e2e -t single-gpu --mock
 
 # Verbose output, stop on first failure
 e2e -t single-gpu -v -x

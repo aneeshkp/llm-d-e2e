@@ -37,7 +37,8 @@ def pytest_addoption(parser):
     parser.addoption("--model-source", default="hf", help="Model source: hf, pvc")
     parser.addoption("--model", default="", help="Override model name")
     parser.addoption("--endpoint", default="", help="Service URL for discover mode")
-    parser.addoption("--mock", default="", help="Mock vLLM image (no GPU)")
+    parser.addoption("--mock", default="", help="Simulator image (no GPU needed)")
+    parser.addoption("--render-image", default="", help="vLLM CPU image for tokenizer render sidecar")
     parser.addoption("--pull-secret", default="", help="Pull secret name")
     parser.addoption("--bearer-token", default="", help="Bearer token for auth")
     parser.addoption("--disable-auth", action="store_true", help="Disable WASM auth")
@@ -77,6 +78,7 @@ def deployer(request) -> Deployer:
         namespace=request.config.getoption("--namespace"),
         model_source=request.config.getoption("--model-source"),
         mock_image=request.config.getoption("--mock"),
+        render_image=request.config.getoption("--render-image"),
         pull_secret=request.config.getoption("--pull-secret"),
         disable_auth=request.config.getoption("--disable-auth"),
     )
