@@ -53,14 +53,14 @@ Makefile targets mirror CLI: `make test TESTCASE=single-gpu`, `make unittest`, `
 ### Fixture scoping
 
 - **Session-scoped**: `deployer` (one kubectl wrapper per run), `report` (finalized at session end)
-- **Class-scoped**: `endpoint` (resolved per test case via port-forward or explicit URL), `client`, `scraper`
+- **Class-scoped**: `endpoint` (gateway port-forward), `client` (for inference), `pod_endpoint` (direct pod port-forward), `pod_client` (for health/models), `scraper`
 
 ### Source modules (`src/conformance/`)
 
 - **config.py** — Dataclass config types and YAML loaders. YAML keys are camelCase, Python fields are snake_case; `_build()` handles recursive conversion.
-- **deployer.py** — `Deployer`: manages LLMInferenceService lifecycle via `kubectl` subprocess calls. Handles deploy, wait-for-ready, port-forwarding, manifest patching (mock image, pull secrets, auth disable), and cleanup. All cluster interaction is subprocess `kubectl` — no Python K8s client.
+- **deployer.py** — `Deployer`: manages LLMInferenceService lifecycle via `kubectl` subprocess calls. Handles deploy, wait-for-ready, port-forwarding (gateway and direct pod), manifest patching (mock image, pull secrets, auth disable), EPP metrics RBAC setup/teardown, and cleanup. All cluster interaction is subprocess `kubectl` — no Python K8s client.
 - **client.py** — `LLMClient`: OpenAI-compatible HTTP client (httpx) for `/health`, `/v1/models`, `/v1/completions`, `/v1/chat/completions`.
-- **metrics.py** — `Scraper`: scrapes Prometheus metrics from pods via `kubectl exec`. `parse_prometheus()` parses text exposition format. Per-topology validators: `validate_vllm_basic`, `validate_cache_aware`, `validate_pd`, `validate_scheduler`.
+- **metrics.py** — `Scraper`: scrapes Prometheus metrics from pods via `kubectl exec` (python3/wget), falling back to port-forward + httpx for containers without those tools (simulator, distroless). Supports bearer token auth for EPP metrics (`--metrics-endpoint-auth=true`). `parse_prometheus()` parses text exposition format. Per-topology validators: `validate_vllm_basic`, `validate_cache_aware`, `validate_pd`, `validate_scheduler`.
 - **model.py** — `ModelDownloader`: creates PVCs and download Jobs for pre-caching models from HuggingFace.
 - **report.py** — JSON report generation with pass/fail/skip summary.
 
@@ -111,12 +111,26 @@ Each metrics validator in `metrics.py` targets a specific deployment topology:
 
 EPP pod discovery tries multiple label patterns (`EPP_LABELS` list in `metrics.py`) because the component label varies across llm-d versions.
 
+### Endpoint routing (gateway vs pod)
+
+Health (`/health`) and models (`/v1/models`) endpoints return 503 when routed through the Gateway API + EPP because the EPP only handles inference requests. The test suite uses two separate port-forwards:
+- **Gateway** (`client` fixture): `localhost → inference-gateway-istio:80` — for `/v1/chat/completions` (test_09)
+- **Pod** (`pod_client` fixture): `localhost → workload-pod:8000` — for `/health` (test_07) and `/v1/models` (test_08)
+
+### EPP metrics auth
+
+The EPP's `--metrics-endpoint-auth=true` flag (default in RHOAI 3.5+) requires bearer token auth to scrape `/metrics` on port 9090. During deploy, `Deployer.ensure_metrics_rbac()` creates a `ClusterRoleBinding` granting the EPP's service account access to `kserve-metrics-reader-cluster-role`. The scraper generates a token via `kubectl create token` and passes it as a bearer header. The binding is cleaned up during `Deployer.cleanup()`.
+
+EPP pod discovery uses multiple label patterns (`EPP_LABELS` in `metrics.py`) because the component label varies across llm-d versions. Current pattern: `app.kubernetes.io/component=llminferenceservice-router-scheduler`.
+
 ## Key Design Decisions
 
 - All cluster interaction goes through `kubectl` subprocess calls (no Python K8s client library).
 - Test cases are data-driven via YAML configs, not hardcoded in test files.
 - The `--mock` flag swaps the vLLM container with llm-d-inference-sim, injects simulator args, and strips GPU resource requests, enabling full e2e flow without GPUs.
 - camelCase in YAML, snake_case in Python — `_snake()` and `_build()` in `config.py` bridge the two.
+- Health/models go directly to pods; inference goes through the gateway — the EPP only routes inference requests.
+- Metrics scraping tries `kubectl exec` first (python3, wget), falls back to port-forward + httpx for minimal container images.
 
 ## Code Style
 
