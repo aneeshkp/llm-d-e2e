@@ -112,8 +112,20 @@ def client(endpoint: str, request) -> LLMClient:
 
 
 @pytest.fixture(scope="class")
+def pod_endpoint(deployer: Deployer, tc: TestCase) -> str:
+    return deployer.get_pod_endpoint(tc.name)
+
+
+@pytest.fixture(scope="class")
+def pod_client(pod_endpoint: str, request) -> LLMClient:
+    c = LLMClient(base_url=pod_endpoint, bearer_token=request.config.getoption("--bearer-token"))
+    yield c
+    c.close()
+
+
+@pytest.fixture(scope="class")
 def scraper(deployer: Deployer) -> Scraper:
-    return Scraper(kubectl_fn=deployer.kubectl, namespace=deployer.namespace)
+    return Scraper(kubectl_fn=deployer.kubectl, namespace=deployer.namespace, kubeconfig=deployer.kubeconfig)
 
 
 @pytest.fixture(scope="session")

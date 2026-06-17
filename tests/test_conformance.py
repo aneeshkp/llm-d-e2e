@@ -88,15 +88,15 @@ class TestConformance:
         deployer.wait_for_ready(tc, print_fn=_log)
         _log(f"'{tc.name}' is Ready")
 
-    def test_07_health(self, client: LLMClient, tc: TestCase, endpoint: str):
-        """Health endpoint should return 200."""
+    def test_07_health(self, pod_client: LLMClient, tc: TestCase, pod_endpoint: str):
+        """Health endpoint should return 200 (direct pod access, bypasses gateway EPP)."""
         max_retries = max(tc.validation.retry_attempts, 10)
         interval = tc.validation.retry_interval.total_seconds() or 15
-        _log(f"Endpoint: {endpoint}")
+        _log(f"Pod endpoint: {pod_endpoint}")
         _log(f"Checking health (up to {max_retries} attempts, {interval:.0f}s interval)")
         for attempt in range(max_retries):
             try:
-                client.health_check()
+                pod_client.health_check()
                 _log(f"Health check PASSED (attempt {attempt + 1})")
                 return
             except Exception as e:
@@ -106,9 +106,9 @@ class TestConformance:
                     raise
                 time.sleep(interval)
 
-    def test_08_models(self, client: LLMClient, tc: TestCase):
-        """Model should be listed in /v1/models."""
-        resp = client.list_models()
+    def test_08_models(self, pod_client: LLMClient, tc: TestCase):
+        """Model should be listed in /v1/models (direct pod access, bypasses gateway EPP)."""
+        resp = pod_client.list_models()
         models = [m["id"] for m in resp.get("data", [])]
         _log(f"Models listed: {models}")
         assert models, "No models returned"

@@ -57,6 +57,8 @@ class Deployer:
         self.manifest_dir = Path(manifest_dir)
         self._port_forward_proc: subprocess.Popen | None = None
         self._port_forward_port: int = 0
+        self._pod_pf_proc: subprocess.Popen | None = None
+        self._pod_pf_port: int = 0
         self._render_image_cached: str | None = None
 
     @property
@@ -153,6 +155,34 @@ class Deployer:
         except RuntimeError as e:
             log.warning("Could not patch gateway allowedRoutes: %s", e)
 
+    def ensure_metrics_rbac(self, name: str):
+        """Bind the EPP service account to kserve-metrics-reader-cluster-role for metrics scraping."""
+        sa_name = f"{name}-epp-sa"
+        binding_name = f"{self.namespace}-{name}-metrics-reader"
+        try:
+            self.kubectl("get", "clusterrolebinding", binding_name, check=False)
+            existing = self.kubectl(
+                "get", "clusterrolebinding", binding_name,
+                "-o", "jsonpath={.metadata.name}", check=False,
+            )
+            if existing:
+                return
+        except RuntimeError:
+            pass
+        try:
+            self.kubectl(
+                "create", "clusterrolebinding", binding_name,
+                "--clusterrole=kserve-metrics-reader-cluster-role",
+                f"--serviceaccount={self.namespace}:{sa_name}",
+            )
+            log.info("Created metrics RBAC binding %s for %s", binding_name, sa_name)
+        except RuntimeError as e:
+            log.warning("Could not create metrics RBAC binding: %s", e)
+
+    def cleanup_metrics_rbac(self, name: str):
+        binding_name = f"{self.namespace}-{name}-metrics-reader"
+        self.kubectl("delete", "clusterrolebinding", binding_name, "--ignore-not-found", check=False)
+
     def check_crd_exists(self, crd_name: str) -> bool:
         try:
             self.kubectl("get", "crd", crd_name)
@@ -187,6 +217,7 @@ class Deployer:
                 self.ensure_pull_secret(secret_name)
             self.ensure_gateway_allows_namespace()
             self.kubectl("apply", "-n", self.namespace, "-f", tmp_path)
+            self.ensure_metrics_rbac(tc.name)
             result.success = True
         except RuntimeError as e:
             result.error = str(e)
@@ -367,15 +398,49 @@ class Deployer:
 
         return f"http://localhost:{local_port}{path}"
 
+    def get_pod_endpoint(self, name: str) -> str:
+        """Port-forward directly to a workload pod, bypassing the gateway/EPP."""
+        if self._pod_pf_proc and self._pod_pf_proc.poll() is None:
+            return f"https://localhost:{self._pod_pf_port}"
+
+        label = WORKLOAD_LABEL.format(name=name)
+        output = self.kubectl(
+            "get", "pods", "-n", self.namespace, "-l", label,
+            "-o", "jsonpath={.items[0].metadata.name}",
+        )
+        pod_name = output.strip()
+        if not pod_name:
+            raise RuntimeError(f"No workload pod found for {name}")
+
+        local_port = self._find_free_port()
+        cmd = ["kubectl"]
+        if self.kubeconfig:
+            cmd += ["--kubeconfig", self.kubeconfig]
+        cmd += ["port-forward", "-n", self.namespace, pod_name, f"{local_port}:8000"]
+
+        log.info("Starting pod port-forward: localhost:%d → %s:8000", local_port, pod_name)
+        self._pod_pf_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self._pod_pf_port = local_port
+
+        time.sleep(3)
+        if self._pod_pf_proc.poll() is not None:
+            self._pod_pf_proc = None
+            raise RuntimeError(f"Pod port-forward to {pod_name} failed to start")
+
+        return f"https://localhost:{local_port}"
+
     def stop_port_forward(self):
-        if self._port_forward_proc:
-            self._port_forward_proc.terminate()
-            self._port_forward_proc.wait(timeout=5)
-            self._port_forward_proc = None
-            log.info("Port-forward stopped")
+        for proc_attr in ("_port_forward_proc", "_pod_pf_proc"):
+            proc = getattr(self, proc_attr)
+            if proc:
+                proc.terminate()
+                proc.wait(timeout=5)
+                setattr(self, proc_attr, None)
+        log.info("Port-forwards stopped")
 
     def cleanup(self, tc: TestCase, timeout: float = 120):
         log.info("Cleaning up %s", tc.name)
+        self.cleanup_metrics_rbac(tc.name)
         self.kubectl(
             "delete", "llminferenceservice", tc.name, "-n", self.namespace,
             "--timeout", f"{int(timeout)}s", "--ignore-not-found",

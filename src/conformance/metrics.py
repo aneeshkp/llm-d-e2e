@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import logging
 import re
+import socket
+import subprocess
+import time
 from dataclasses import dataclass, field
+
+import httpx
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +40,7 @@ WORKLOAD_LABEL = "app.kubernetes.io/name={name},app.kubernetes.io/component=llmi
 PREFILL_LABEL = "app.kubernetes.io/name={name},app.kubernetes.io/component=llminferenceservice-workload-prefill"
 EPP_LABELS = [
     "app.kubernetes.io/name={name}-epp",
+    "app.kubernetes.io/component=llminferenceservice-router-scheduler,app.kubernetes.io/name={name}",
     "app.kubernetes.io/component=endpoint-picker,app.kubernetes.io/name={name}",
     "app.kubernetes.io/component=router-scheduler,app.kubernetes.io/name={name}",
     "kserve.io/component=scheduler,app.kubernetes.io/name={name}",
@@ -107,29 +113,79 @@ def parse_prometheus(text: str) -> dict[str, list[Metric]]:
 
 
 class Scraper:
-    """Scrapes Prometheus metrics from pods via kubectl exec."""
+    """Scrapes Prometheus metrics from pods via kubectl exec or port-forward."""
 
-    def __init__(self, kubectl_fn, namespace: str):
+    def __init__(self, kubectl_fn, namespace: str, kubeconfig: str = ""):
         self._kubectl = kubectl_fn
         self.namespace = namespace
+        self.kubeconfig = kubeconfig
 
-    def scrape_pod(self, pod: str, port: int = 8000) -> ScrapeResult:
+    def _scrape_via_exec(self, pod: str, port: int) -> str:
         script = (
             f"import urllib.request,ssl; "
             f"print(urllib.request.urlopen('https://localhost:{port}/metrics',"
             f"context=ssl._create_unverified_context()).read().decode())"
         )
         try:
-            text = self._kubectl(
-                "exec", pod, "-n", self.namespace, "--",
-                "python3", "-c", script,
-            )
+            return self._kubectl("exec", pod, "-n", self.namespace, "--", "python3", "-c", script)
         except RuntimeError:
-            text = self._kubectl(
+            return self._kubectl(
                 "exec", pod, "-n", self.namespace, "--",
-                "wget", "--no-check-certificate", "-qO-",
-                f"https://localhost:{port}/metrics",
+                "wget", "--no-check-certificate", "-qO-", f"https://localhost:{port}/metrics",
             )
+
+    def _get_pod_sa_token(self, pod: str) -> str:
+        """Get a bearer token for the pod's service account via kubectl create token."""
+        sa = self._kubectl(
+            "get", "pod", pod, "-n", self.namespace,
+            "-o", "jsonpath={.spec.serviceAccountName}", check=False,
+        )
+        if not sa:
+            return ""
+        cmd = ["kubectl"]
+        if self.kubeconfig:
+            cmd += ["--kubeconfig", self.kubeconfig]
+        cmd += ["create", "token", sa, "-n", self.namespace]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        return result.stdout.strip() if result.returncode == 0 else ""
+
+    def _scrape_via_port_forward(self, pod: str, port: int) -> str:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("", 0))
+            local_port = s.getsockname()[1]
+        cmd = ["kubectl"]
+        if self.kubeconfig:
+            cmd += ["--kubeconfig", self.kubeconfig]
+        cmd += ["port-forward", "-n", self.namespace, pod, f"{local_port}:{port}"]
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            time.sleep(2)
+            if proc.poll() is not None:
+                raise RuntimeError(f"Port-forward to {pod}:{port} failed to start")
+            token = self._get_pod_sa_token(pod)
+            headers_with_auth = {"Authorization": f"Bearer {token}"} if token else {}
+            for scheme in ("https", "http"):
+                for headers in (headers_with_auth, {}) if headers_with_auth else ({},):
+                    try:
+                        r = httpx.get(
+                            f"{scheme}://localhost:{local_port}/metrics",
+                            headers=headers, verify=False, timeout=15,
+                        )
+                        r.raise_for_status()
+                        return r.text
+                    except (httpx.ConnectError, httpx.HTTPStatusError):
+                        continue
+            raise RuntimeError(f"Could not reach {pod}:{port} metrics via port-forward")
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+    def scrape_pod(self, pod: str, port: int = 8000) -> ScrapeResult:
+        try:
+            text = self._scrape_via_exec(pod, port)
+        except RuntimeError:
+            log.info("exec failed for %s, falling back to port-forward", pod)
+            text = self._scrape_via_port_forward(pod, port)
         return ScrapeResult(source=pod, metrics=parse_prometheus(text))
 
     def scrape_pods_by_label(self, label: str, port: int = 8000) -> list[ScrapeResult]:
