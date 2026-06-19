@@ -46,6 +46,13 @@ def main():
     parser.add_argument("--storage-class", default="", help="StorageClass for PVC")
     parser.add_argument("--storage-size", default="", help="Override PVC size")
 
+    # Benchmark
+    parser.add_argument("--guidellm-image", default="", help="GuideLLM benchmark image override")
+
+    # Node placement
+    parser.add_argument("--decode-node-selector", default="", help="Node selector for decode pods (key=value)")
+    parser.add_argument("--prefill-node-selector", default="", help="Node selector for prefill pods (key=value)")
+
     # Behavior
     parser.add_argument("--nocleanup", action="store_true", help="Keep resources after test")
     parser.add_argument("--report-dir", default="reports", help="Report output directory")
@@ -96,6 +103,9 @@ def main():
         "storage_class": "--storage-class",
         "storage_size": "--storage-size",
         "report_dir": "--report-dir",
+        "guidellm_image": "--guidellm-image",
+        "decode_node_selector": "--decode-node-selector",
+        "prefill_node_selector": "--prefill-node-selector",
     }
 
     for attr, flag in flag_map.items():

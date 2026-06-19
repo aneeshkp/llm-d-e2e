@@ -8,6 +8,7 @@ import socket
 import subprocess
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import httpx
 
@@ -25,8 +26,15 @@ VLLM_PREFIX_HITS = "vllm:prefix_cache_hits"
 VLLM_PREFIX_HITS_ALT = "vllm:prefix_cache_hits_total"
 
 # NIXL metrics
-NIXL_TRANSFERS = "nixl:kv_transfer_count_total"
-NIXL_FAILURES = "nixl:kv_transfer_failures_total"
+NIXL_XFER_COUNT = "vllm:nixl_xfer_time_seconds_count"
+NIXL_XFER_SUM = "vllm:nixl_xfer_time_seconds_sum"
+NIXL_BYTES_SUM = "vllm:nixl_bytes_transferred_sum"
+NIXL_FAILED_TRANSFERS = "vllm:nixl_num_failed_transfers_total"
+NIXL_FAILED_NOTIFICATIONS = "vllm:nixl_num_failed_notifications_total"
+
+# P/D token source metrics
+VLLM_PROMPT_BY_SOURCE = "vllm:prompt_tokens_by_source_total"
+VLLM_DECODE_TIME = "vllm:request_decode_time_seconds_sum"
 
 # EPP / Scheduler metrics
 SCHED_E2E = "inference_extension_scheduler_e2e_duration_seconds_count"
@@ -64,11 +72,14 @@ class Metric:
 class ScrapeResult:
     source: str
     metrics: dict[str, list[Metric]] = field(default_factory=dict)
+    raw_text: str = ""
 
-    def get(self, name: str, fallback: str = "") -> float | None:
+    def get(self, name: str, fallback: str = "", **label_filter) -> float | None:
         for key in (name, fallback) if fallback else (name,):
             if key in self.metrics:
                 values = self.metrics[key]
+                if label_filter:
+                    values = [m for m in values if all(m.labels.get(k) == v for k, v in label_filter.items())]
                 if values:
                     return sum(m.value for m in values)
         return None
@@ -192,7 +203,7 @@ class Scraper:
         except RuntimeError:
             log.info("exec failed for %s, falling back to port-forward", pod)
             text = self._scrape_via_port_forward(pod, port)
-        return ScrapeResult(source=pod, metrics=parse_prometheus(text))
+        return ScrapeResult(source=pod, metrics=parse_prometheus(text), raw_text=text)
 
     def scrape_pods_by_label(self, label: str, port: int = 8000) -> list[ScrapeResult]:
         output = self._kubectl(
@@ -225,22 +236,37 @@ class Scraper:
         return []
 
 
+def dump_raw_metrics(results: list[ScrapeResult], output_dir: str, label: str = "") -> list[str]:
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for r in results:
+        if not r.raw_text:
+            continue
+        prefix = f"{label}-" if label else ""
+        safe_name = r.source.replace("/", "_")
+        path = out / f"{prefix}{safe_name}.prom"
+        path.write_text(r.raw_text)
+        paths.append(str(path))
+    return paths
+
+
 def validate_vllm_basic(results: list[ScrapeResult]) -> list[CheckResult]:
     checks = []
-    total = 0.0
+    total_success = 0.0
     for r in results:
         val = r.get(VLLM_REQUEST_SUCCESS)
         if val is not None:
-            total += val
+            total_success += val
         checks.append(CheckResult(
             name="request_success", metric=VLLM_REQUEST_SUCCESS, source=r.source,
             value=val or 0, passed=True,
-            message=f"request_success={val}" if val else "no traffic on this pod",
+            message=f"request_success={val}" if val else "no traffic yet",
         ))
     checks.append(CheckResult(
         name="request_success_aggregate", metric=VLLM_REQUEST_SUCCESS, source="all-pods",
-        value=total, passed=total > 0,
-        message=f"aggregate request_success={total}",
+        value=total_success, passed=total_success > 0,
+        message=f"aggregate request_success={total_success}",
     ))
     return checks
 
@@ -286,23 +312,57 @@ def validate_cache_aware(vllm: list[ScrapeResult], epp: list[ScrapeResult]) -> l
     return checks
 
 
-def validate_pd(vllm: list[ScrapeResult]) -> list[CheckResult]:
-    checks = validate_vllm_basic(vllm)
-    for r in vllm:
-        for metric, label in [(VLLM_PROMPT_TOKENS, "prompt_tokens"), (VLLM_GEN_TOKENS, "gen_tokens")]:
-            val = r.get(metric)
+def validate_pd(decode: list[ScrapeResult], prefill: list[ScrapeResult]) -> list[CheckResult]:
+    checks = validate_vllm_basic(decode)
+    total_gen = sum((r.get(VLLM_GEN_TOKENS) or 0) for r in decode)
+    checks.append(CheckResult(
+        name="decode_gen_tokens", metric=VLLM_GEN_TOKENS, source="decode-aggregate",
+        value=total_gen, passed=total_gen > 0,
+        message=f"decode generation_tokens={total_gen}",
+    ))
+    total_prompt = sum((r.get(VLLM_PROMPT_TOKENS) or 0) for r in prefill)
+    checks.append(CheckResult(
+        name="prefill_prompt_tokens", metric=VLLM_PROMPT_TOKENS, source="prefill-aggregate",
+        value=total_prompt, passed=total_prompt > 0,
+        message=f"prefill prompt_tokens={total_prompt}",
+    ))
+    nixl_xfers = sum((r.get(NIXL_XFER_COUNT) or 0) for r in decode)
+    checks.append(CheckResult(
+        name="nixl_transfers", metric=NIXL_XFER_COUNT, source="decode-aggregate",
+        value=nixl_xfers, passed=nixl_xfers > 0,
+        message=f"nixl transfers={nixl_xfers:.0f}",
+    ))
+    nixl_failed = sum((r.get(NIXL_FAILED_TRANSFERS) or 0) for r in decode + prefill)
+    checks.append(CheckResult(
+        name="nixl_failed_transfers", metric=NIXL_FAILED_TRANSFERS, source="all-pods",
+        value=nixl_failed, passed=nixl_failed == 0,
+        message=f"nixl failed_transfers={nixl_failed:.0f}",
+    ))
+    nixl_bytes = sum((r.get(NIXL_BYTES_SUM) or 0) for r in decode)
+    checks.append(CheckResult(
+        name="nixl_bytes_transferred", metric=NIXL_BYTES_SUM, source="decode-aggregate",
+        value=nixl_bytes, passed=nixl_bytes > 0,
+        message=f"nixl bytes_transferred={nixl_bytes:.0f}",
+    ))
+    decode_by_source = {}
+    prefill_by_source = {}
+    for role, pods, store in [("decode", decode, decode_by_source), ("prefill", prefill, prefill_by_source)]:
+        for src in ("local_compute", "local_cache_hit", "external_kv_transfer"):
+            total = sum((r.get(VLLM_PROMPT_BY_SOURCE, source=src) or 0) for r in pods)
+            store[src] = total
+            is_required = (role == "decode" and src == "external_kv_transfer") or (role == "prefill" and src == "local_compute")
             checks.append(CheckResult(
-                name=label, metric=metric, source=r.source,
-                value=val or 0, passed=val is not None and val > 0,
-                message=f"{label}={val}",
+                name=f"{role}_{src}", metric=VLLM_PROMPT_BY_SOURCE, source=f"{role}-aggregate",
+                value=total, passed=total > 0 if is_required else True,
+                message=f"{role} {src}={total:.0f}",
             ))
-        preempt = r.get(VLLM_PREEMPTIONS)
-        if preempt is not None:
-            checks.append(CheckResult(
-                name="preemptions", metric=VLLM_PREEMPTIONS, source=r.source,
-                value=preempt, passed=preempt < 10,
-                message=f"preemptions={preempt}",
-            ))
+    kv_transfer = decode_by_source.get("external_kv_transfer", 0)
+    local_compute = decode_by_source.get("local_compute", 0)
+    checks.append(CheckResult(
+        name="decode_kv_over_compute", metric=VLLM_PROMPT_BY_SOURCE, source="decode-aggregate",
+        value=kv_transfer, passed=kv_transfer > local_compute,
+        message=f"decode kv_transfer={kv_transfer:.0f} vs local_compute={local_compute:.0f}",
+    ))
     return checks
 
 
