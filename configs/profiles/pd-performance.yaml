@@ -1,0 +1,4 @@
+name: pd-performance
+description: "P/D performance benchmark with GuideLLM"
+testCases:
+  - pd-performance

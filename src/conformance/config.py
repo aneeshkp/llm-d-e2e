@@ -78,6 +78,34 @@ class MultiPoolCheck:
 
 
 @dataclass
+class BenchmarkThresholds:
+    min_output_tokens_per_second: float = 100.0
+    max_ttft_median_ms: float = 15000.0
+    max_ttft_p95_ms: float = 30000.0
+    max_itl_median_ms: float = 50.0
+    max_itl_p95_ms: float = 100.0
+    max_failed_ratio: float = 0.05
+
+
+@dataclass
+class BenchmarkConfig:
+    enabled: bool = False
+    image: str = "ghcr.io/vllm-project/guidellm:v0.6.0"
+    rate: int = 100
+    max_seconds: int = 240
+    data: str = (
+        "prompt_tokens=8000,prompt_tokens_stdev=8500,prompt_tokens_min=50,prompt_tokens_max=30000,"
+        "output_tokens=800,output_tokens_stdev=1500,output_tokens_min=20,output_tokens_max=8000"
+    )
+    backend_type: str = "openai_http"
+    request_type: str = "text_completions"
+    warmup_rate: int = 10
+    warmup_max_seconds: int = 60
+    timeout: timedelta = field(default_factory=lambda: timedelta(minutes=30))
+    thresholds: BenchmarkThresholds = field(default_factory=BenchmarkThresholds)
+
+
+@dataclass
 class ChatPrompt:
     role: str = "user"
     content: str = ""
@@ -121,6 +149,7 @@ class ValidateConfig:
     retry_interval: timedelta = field(default_factory=lambda: timedelta(seconds=15))
     metrics_check: MetricsCheck = field(default_factory=MetricsCheck)
     multi_pool: MultiPoolCheck | None = None
+    benchmark: BenchmarkConfig = field(default_factory=BenchmarkConfig)
 
 
 @dataclass
@@ -175,6 +204,10 @@ def _build(cls, data: dict | None):
             kwargs[snake_key] = _build(MetricsCheck, val) if val else MetricsCheck()
         elif "MultiPoolCheck" in str(hint):
             kwargs[snake_key] = _build(MultiPoolCheck, val) if val else None
+        elif "BenchmarkThresholds" in str(hint):
+            kwargs[snake_key] = _build(BenchmarkThresholds, val) if val else BenchmarkThresholds()
+        elif "BenchmarkConfig" in str(hint):
+            kwargs[snake_key] = _build(BenchmarkConfig, val) if val else BenchmarkConfig()
         elif "ModelConfig" in str(hint):
             kwargs[snake_key] = _build(ModelConfig, val) if val else ModelConfig()
         elif "DeployConfig" in str(hint):
