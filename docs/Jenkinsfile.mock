@@ -1,0 +1,97 @@
+pipeline {
+    agent { label 'kubernetes' }
+
+    parameters {
+        string(name: 'E2E_REPO',
+               defaultValue: 'https://github.com/aneeshkp/llm-d-e2e.git',
+               description: 'llm-d-e2e test repo URL')
+        string(name: 'E2E_BRANCH',
+               defaultValue: 'main',
+               description: 'llm-d-e2e repo branch')
+        string(name: 'MANIFEST_REPO',
+               defaultValue: 'https://github.com/aneeshkp/llm-d-conformance-manifests.git',
+               description: 'Conformance manifest repo URL')
+        string(name: 'MANIFEST_REF',
+               defaultValue: 'main',
+               description: 'Manifest branch (e.g. main, 3.4-stable)')
+        string(name: 'TESTCASE',
+               defaultValue: 'single-gpu-smoke',
+               description: 'Test case name(s), comma-separated (e.g. single-gpu-smoke,single-gpu)')
+        string(name: 'MOCK_IMAGE',
+               defaultValue: 'ghcr.io/llm-d/llm-d-inference-sim:latest',
+               description: 'Simulator image (no GPU needed)')
+        string(name: 'NAMESPACE',
+               defaultValue: 'llm-conformance-test',
+               description: 'Kubernetes namespace for test resources')
+        string(name: 'KUBECONFIG_CRED',
+               defaultValue: 'llmd-kubeconfig',
+               description: 'Jenkins credential ID for kubeconfig file')
+        string(name: 'PULL_SECRET',
+               defaultValue: '',
+               description: 'Image pull secret name (leave empty if not needed)')
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                git url: "${params.E2E_REPO}", branch: "${params.E2E_BRANCH}"
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                sh '''
+                    if ! command -v uv &>/dev/null; then
+                        curl -LsSf https://astral.sh/uv/install.sh | sh
+                        export PATH="$HOME/.local/bin:$PATH"
+                    fi
+                    uv sync
+                '''
+            }
+        }
+
+        stage('Setup Manifests') {
+            steps {
+                sh "make setup MANIFEST_REPO=${params.MANIFEST_REPO} MANIFEST_REF=${params.MANIFEST_REF}"
+            }
+        }
+
+        stage('Run Mock Tests') {
+            steps {
+                withCredentials([file(credentialsId: "${params.KUBECONFIG_CRED}", variable: 'KUBECONFIG')]) {
+                    script {
+                        def cmd = """
+                            uv run llm-d-e2e \
+                                -t ${params.TESTCASE} \
+                                --mock ${params.MOCK_IMAGE} \
+                                --namespace ${params.NAMESPACE} \
+                                --kubeconfig \$KUBECONFIG \
+                                --html reports/report.html \
+                                -v
+                        """.stripIndent().trim()
+
+                        if (params.PULL_SECRET?.trim()) {
+                            cmd += " --pull-secret ${params.PULL_SECRET}"
+                        }
+
+                        sh cmd
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
+            publishHTML(target: [
+                reportDir: 'reports',
+                reportFiles: 'report.html',
+                reportName: 'llm-d Conformance Report'
+            ])
+        }
+        failure {
+            echo 'Mock conformance tests failed. Check the HTML report for details.'
+        }
+    }
+}
