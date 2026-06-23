@@ -29,6 +29,9 @@ packages = ["src/conformance"]
 testpaths = ["tests"]
 addopts = "-v -s --tb=short"
 timeout = 21600
+filterwarnings = [
+    "ignore::pytest.PytestCollectionWarning",
+]
 
 [tool.ruff]
 line-length = 120
