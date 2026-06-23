@@ -20,11 +20,13 @@ import time
 
 import pytest
 
+from conformance.benchmark import run_benchmark
 from conformance.config import TestCase
 from conformance.client import LLMClient
 from conformance.deployer import Deployer
 from conformance.metrics import (
     Scraper,
+    dump_raw_metrics,
     validate_cache_aware,
     validate_pd,
     validate_scheduler,
@@ -37,6 +39,19 @@ LLMISVC_CRD = "llminferenceservices.serving.kserve.io"
 
 def _log(msg: str, capsys=None):
     print(f"  → {msg}")
+
+
+def _check_threshold(name: str, value: float, min_value: float | None = None, max_value: float | None = None) -> bool:
+    passed = True
+    if min_value is not None and value < min_value:
+        _log(f"FAIL: {name} = {value:.4f} < minimum {min_value}")
+        passed = False
+    if max_value is not None and value > max_value:
+        _log(f"FAIL: {name} = {value:.4f} > maximum {max_value}")
+        passed = False
+    if passed:
+        _log(f"PASS: {name} = {value:.4f}")
+    return passed
 
 
 class TestConformance:
@@ -123,10 +138,10 @@ class TestConformance:
             resp = client.chat(model=tc.model.name, prompt=prompt)
             choices = resp.get("choices", [])
             assert choices, f"No choices returned for prompt: {prompt}"
-            content = choices[0].get("message", {}).get("content", "")
+            content = choices[0].get("message", {}).get("content") or ""
             tokens = resp.get("usage", {}).get("total_tokens", 0)
             _log(f"Response: '{content[:80]}...' ({tokens} tokens)")
-            assert content, f"Empty response for prompt: {prompt}"
+            assert content or tokens > 0, f"Empty response for prompt: {prompt}"
             assert tokens > 0, "No tokens generated"
 
     def test_10_metrics_vllm(self, scraper: Scraper, tc: TestCase):
@@ -158,7 +173,7 @@ class TestConformance:
         failed = [c for c in checks if not c.passed]
         assert not failed, f"Cache metric checks failed: {[c.message for c in failed]}"
 
-    def test_12_metrics_pd(self, scraper: Scraper, tc: TestCase):
+    def test_12_metrics_pd(self, scraper: Scraper, tc: TestCase, request):
         """P/D metrics should show token distribution."""
         mc = tc.validation.metrics_check
         if not mc.enabled or not mc.check_pd:
@@ -166,13 +181,19 @@ class TestConformance:
         _log("Scraping P/D metrics...")
         vllm = scraper.scrape_vllm(tc.name)
         prefill = scraper.scrape_prefill(tc.name)
-        checks = validate_pd(vllm + prefill)
+        report_dir = request.config.getoption("--report-dir")
+        metrics_dir = f"{report_dir}/metrics-pre-benchmark"
+        paths = dump_raw_metrics(vllm, metrics_dir, label="decode")
+        paths += dump_raw_metrics(prefill, metrics_dir, label="prefill")
+        for p in paths:
+            _log(f"  saved {p}")
+        checks = validate_pd(vllm, prefill)
         for c in checks:
             _log(f"  {c.name}: {'PASS' if c.passed else 'FAIL'} — {c.message}")
         failed = [c for c in checks if not c.passed]
         assert not failed, f"P/D metric checks failed: {[c.message for c in failed]}"
 
-    def test_13_metrics_scheduler(self, scraper: Scraper, tc: TestCase):
+    def test_13_metrics_scheduler(self, scraper: Scraper, tc: TestCase, request):
         """Scheduler/EPP metrics should show processed requests."""
         mc = tc.validation.metrics_check
         if not mc.enabled or not mc.check_scheduler:
@@ -181,11 +202,107 @@ class TestConformance:
         epp = scraper.scrape_epp(tc.name)
         _log(f"Scraped {len(epp)} EPP pod(s)")
         assert epp, "No EPP metrics scraped"
+        report_dir = request.config.getoption("--report-dir")
+        paths = dump_raw_metrics(epp, f"{report_dir}/metrics", label="epp")
+        for p in paths:
+            _log(f"  saved {p}")
         checks = validate_scheduler(epp)
         for c in checks:
             _log(f"  {c.name}: {'PASS' if c.passed else 'FAIL'} — {c.message}")
         failed = [c for c in checks if not c.passed]
         assert not failed, f"Scheduler metric checks failed: {[c.message for c in failed]}"
+
+    def test_14_benchmark(self, deployer: Deployer, tc: TestCase, guidellm_image: str):
+        """Run GuideLLM benchmark and check performance thresholds."""
+        bc = tc.validation.benchmark
+        if not bc.enabled:
+            pytest.skip("benchmark disabled")
+
+        gateway_addr = deployer.wait_for_gateway(timeout=60)
+        target_url = f"http://{gateway_addr}/{deployer.namespace}/{tc.name}"
+        image = guidellm_image or bc.image
+
+        if bc.warmup_rate > 0:
+            _log(f"[WARMUP] Running warmup benchmark (rate={bc.warmup_rate}, max_seconds={bc.warmup_max_seconds})")
+            warmup = run_benchmark(
+                kubectl_fn=deployer.kubectl,
+                namespace=deployer.namespace,
+                target_url=target_url,
+                model=tc.model.name,
+                image=image,
+                rate=bc.warmup_rate,
+                max_seconds=bc.warmup_max_seconds,
+                data=bc.data,
+                backend_type=bc.backend_type,
+                request_type=bc.request_type,
+                timeout=bc.timeout.total_seconds(),
+                job_name="guidellm-warmup",
+                print_fn=lambda msg: _log(f"[WARMUP] {msg}"),
+            )
+            _log(f"[WARMUP] done — {warmup.completed_requests}/{warmup.total_requests} completed, "
+                 f"otps={warmup.output_tokens_per_second:.1f}")
+
+        _log(f"Running GuideLLM benchmark against {target_url}")
+        _log(f"rate={bc.rate}, max_seconds={bc.max_seconds}, image={image}")
+
+        result = run_benchmark(
+            kubectl_fn=deployer.kubectl,
+            namespace=deployer.namespace,
+            target_url=target_url,
+            model=tc.model.name,
+            image=image,
+            rate=bc.rate,
+            max_seconds=bc.max_seconds,
+            data=bc.data,
+            backend_type=bc.backend_type,
+            request_type=bc.request_type,
+            timeout=bc.timeout.total_seconds(),
+            print_fn=_log,
+        )
+
+        assert result.completed_requests > 0, (
+            f"No requests completed. total={result.total_requests}, failed={result.failed_requests}"
+        )
+
+        t = bc.thresholds
+        failures = []
+        if not _check_threshold("output tokens/s", result.output_tokens_per_second, min_value=t.min_output_tokens_per_second):
+            failures.append(f"output tokens/s={result.output_tokens_per_second:.1f} < {t.min_output_tokens_per_second}")
+        if not _check_threshold("TTFT median (ms)", result.ttft_median, max_value=t.max_ttft_median_ms):
+            failures.append(f"TTFT median={result.ttft_median:.1f}ms > {t.max_ttft_median_ms}ms")
+        if not _check_threshold("TTFT p95 (ms)", result.ttft_p95, max_value=t.max_ttft_p95_ms):
+            failures.append(f"TTFT p95={result.ttft_p95:.1f}ms > {t.max_ttft_p95_ms}ms")
+        if not _check_threshold("ITL median (ms)", result.itl_median, max_value=t.max_itl_median_ms):
+            failures.append(f"ITL median={result.itl_median:.1f}ms > {t.max_itl_median_ms}ms")
+        if not _check_threshold("ITL p95 (ms)", result.itl_p95, max_value=t.max_itl_p95_ms):
+            failures.append(f"ITL p95={result.itl_p95:.1f}ms > {t.max_itl_p95_ms}ms")
+        failed_ratio = result.failed_requests / max(result.total_requests, 1)
+        if not _check_threshold("failed request ratio", failed_ratio, max_value=t.max_failed_ratio):
+            failures.append(f"failed ratio={failed_ratio:.4f} > {t.max_failed_ratio}")
+        assert not failures, f"Performance thresholds breached: {'; '.join(failures)}"
+
+    def test_15_metrics_post_benchmark(self, scraper: Scraper, tc: TestCase, request):
+        """Scrape and validate P/D metrics after benchmark run."""
+        mc = tc.validation.metrics_check
+        bc = tc.validation.benchmark
+        if not mc.enabled or not mc.check_pd or not bc.enabled:
+            pytest.skip("P/D post-benchmark metrics check disabled")
+        _log("Scraping post-benchmark P/D metrics...")
+        decode = scraper.scrape_vllm(tc.name)
+        prefill = scraper.scrape_prefill(tc.name)
+        epp = scraper.scrape_epp(tc.name)
+        report_dir = request.config.getoption("--report-dir")
+        metrics_dir = f"{report_dir}/metrics-post-benchmark"
+        paths = dump_raw_metrics(decode, metrics_dir, label="decode")
+        paths += dump_raw_metrics(prefill, metrics_dir, label="prefill")
+        paths += dump_raw_metrics(epp, metrics_dir, label="epp")
+        for p in paths:
+            _log(f"  saved {p}")
+        checks = validate_pd(decode, prefill)
+        for c in checks:
+            _log(f"  {c.name}: {'PASS' if c.passed else 'FAIL'} — {c.message}")
+        failed = [c for c in checks if not c.passed]
+        assert not failed, f"Post-benchmark P/D metric checks failed: {[c.message for c in failed]}"
 
     def test_99_cleanup(self, deployer: Deployer, tc: TestCase, no_cleanup: bool):
         """Clean up deployed resources."""

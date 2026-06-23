@@ -21,6 +21,14 @@ WORKLOAD_LABEL = "app.kubernetes.io/name={name},app.kubernetes.io/component=llmi
 PREFILL_LABEL = "app.kubernetes.io/name={name},app.kubernetes.io/component=llminferenceservice-workload-prefill"
 
 
+def _parse_node_selector(value: str) -> dict[str, str]:
+    """Parse 'key=value' into a dict, or return empty dict."""
+    if not value or "=" not in value:
+        return {}
+    k, v = value.split("=", 1)
+    return {k.strip(): v.strip()}
+
+
 @dataclass
 class DeployResult:
     name: str = ""
@@ -45,6 +53,8 @@ class Deployer:
         pull_secret: str = "",
         disable_auth: bool = False,
         manifest_dir: str = "deploy/manifests",
+        decode_node_selector: str = "",
+        prefill_node_selector: str = "",
     ):
         self.kubeconfig = kubeconfig
         self.platform = platform
@@ -55,6 +65,8 @@ class Deployer:
         self.pull_secret = pull_secret
         self.disable_auth = disable_auth
         self.manifest_dir = Path(manifest_dir)
+        self.decode_node_selector = _parse_node_selector(decode_node_selector)
+        self.prefill_node_selector = _parse_node_selector(prefill_node_selector)
         self._port_forward_proc: subprocess.Popen | None = None
         self._port_forward_port: int = 0
         self._pod_pf_proc: subprocess.Popen | None = None
@@ -197,6 +209,30 @@ class Deployer:
         except RuntimeError:
             return False
 
+    def _ensure_clean_slate(self, name: str, timeout: float = 120):
+        """If the LLMInferenceService already exists, delete it and wait for all pods to terminate."""
+        if not self.check_resource_exists("llminferenceservice", name):
+            return
+        log.info("LLMInferenceService '%s' already exists, deleting before redeploy", name)
+        self.cleanup_metrics_rbac(name)
+        self.kubectl(
+            "delete", "llminferenceservice", name, "-n", self.namespace,
+            "--timeout", f"{int(timeout)}s", "--ignore-not-found", check=False,
+        )
+        label = f"app.kubernetes.io/name={name}"
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            output = self.kubectl(
+                "get", "pods", "-n", self.namespace, "-l", label,
+                "-o", "jsonpath={.items[*].metadata.name}", check=False,
+            )
+            if not output.strip():
+                log.info("All pods for '%s' terminated", name)
+                return
+            log.info("Waiting for pods to terminate: %s", output.strip())
+            time.sleep(5)
+        log.warning("Timed out waiting for pods to terminate for '%s'", name)
+
     def deploy(self, tc: TestCase) -> DeployResult:
         start = time.time()
         result = DeployResult(name=tc.name, namespace=self.namespace)
@@ -213,6 +249,7 @@ class Deployer:
 
         try:
             self.ensure_namespace()
+            self._ensure_clean_slate(tc.name)
             for secret_name in self._collect_pull_secrets(manifest):
                 self.ensure_pull_secret(secret_name)
             self.ensure_gateway_allows_namespace()
@@ -301,7 +338,7 @@ class Deployer:
         raise TimeoutError(f"Gateway not programmed after {timeout}s")
 
     def wait_for_pods(self, name: str, timeout: float = 600, print_fn=None) -> list[str]:
-        label = WORKLOAD_LABEL.format(name=name)
+        label = f"app.kubernetes.io/name={name}"
         deadline = time.time() + timeout
         start = time.time()
         while time.time() < deadline:
@@ -447,7 +484,7 @@ class Deployer:
             check=False,
         )
         deadline = time.time() + timeout
-        label = WORKLOAD_LABEL.format(name=tc.name)
+        label = f"app.kubernetes.io/name={tc.name}"
         while time.time() < deadline:
             output = self.kubectl(
                 "get", "pods", "-n", self.namespace, "-l", label,
@@ -469,6 +506,8 @@ class Deployer:
         with open(path) as f:
             manifest = yaml.safe_load(f)
 
+        manifest.setdefault("metadata", {})["name"] = tc.name
+
         spec = manifest.get("spec", {})
 
         if self.mock_image:
@@ -487,6 +526,14 @@ class Deployer:
         if self.disable_auth:
             annotations = manifest.setdefault("metadata", {}).setdefault("annotations", {})
             annotations["serving.kserve.io/disable-auth"] = "true"
+
+        if self.decode_node_selector:
+            spec.setdefault("template", {})["nodeSelector"] = self.decode_node_selector
+
+        if self.prefill_node_selector:
+            prefill = spec.get("prefill", {})
+            if prefill:
+                prefill.setdefault("template", {})["nodeSelector"] = self.prefill_node_selector
 
         return manifest
 
