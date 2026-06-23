@@ -504,7 +504,14 @@ class Deployer:
                         "--port", "8000",
                         "--self-signed-certs",
                         "--mode", "random",
+                        "--enable-kvcache", "true",
                     ]
+                    env_list = container.setdefault("env", [])
+                    if not any(e.get("name") == "POD_IP" for e in env_list):
+                        env_list.append({
+                            "name": "POD_IP",
+                            "valueFrom": {"fieldRef": {"fieldPath": "status.podIP"}},
+                        })
                     resources = container.get("resources", {})
                     for section in ("limits", "requests"):
                         resources.get(section, {}).pop("nvidia.com/gpu", None)

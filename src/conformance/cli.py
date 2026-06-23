@@ -121,6 +121,13 @@ def main():
 
 def _list_testcases(testcase_dir: str):
     import yaml
+    ref_file = Path("deploy/manifests/.manifest-ref")
+    if ref_file.exists():
+        info = ref_file.read_text().strip()
+        print(f"Manifests: {info}")
+    else:
+        print("Manifests: not set up (run --setup <branch>)")
+    print()
     print("Test cases:")
     for f in sorted(Path(testcase_dir).glob("*.yaml")):
         with open(f) as fh:
@@ -133,6 +140,13 @@ def _list_testcases(testcase_dir: str):
 
 def _list_profiles():
     import yaml
+    ref_file = Path("deploy/manifests/.manifest-ref")
+    if ref_file.exists():
+        info = ref_file.read_text().strip()
+        print(f"Manifests: {info}")
+    else:
+        print("Manifests: not set up (run --setup <branch>)")
+    print()
     print("Profiles:")
     for f in sorted(Path("configs/profiles").glob("*.yaml")):
         with open(f) as fh:
@@ -145,19 +159,39 @@ def _list_profiles():
 
 
 def _setup_manifests(ref: str):
+    from datetime import datetime, timezone
+
     repo = "https://github.com/aneeshkp/llm-d-conformance-manifests.git"
     manifest_dir = Path("deploy/manifests")
     manifest_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Cloning manifests from {ref}...")
-    subprocess.run(
+    result = subprocess.run(
         ["git", "clone", "--depth", "1", "--branch", ref, repo, "/tmp/llm-d-manifests"],
-        capture_output=True,
+        capture_output=True, text=True,
     )
+    if result.returncode != 0:
+        print(f"Failed to clone manifests: {result.stderr.strip()}")
+        sys.exit(1)
+
+    commit = subprocess.run(
+        ["git", "-C", "/tmp/llm-d-manifests", "rev-parse", "HEAD"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+
     for f in Path("/tmp/llm-d-manifests").glob("*.yaml"):
         (manifest_dir / f.name).write_text(f.read_text())
     subprocess.run(["rm", "-rf", "/tmp/llm-d-manifests"])
-    print(f"Manifests ready in {manifest_dir}/")
+
+    ref_file = manifest_dir / ".manifest-ref"
+    ref_file.write_text(
+        f"branch: {ref}\n"
+        f"repo: {repo}\n"
+        f"commit: {commit}\n"
+        f"date: {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
+    )
+
+    print(f"Manifests ready in {manifest_dir}/ (branch: {ref}, commit: {commit[:8]})")
 
 
 if __name__ == "__main__":

@@ -60,10 +60,14 @@ help: ## Show this help
 .PHONY: setup
 setup: ## Clone manifest repo
 	@rm -rf $(MANIFEST_DIR)/*.yaml
-	@git clone --depth 1 --branch $(MANIFEST_REF) $(MANIFEST_REPO) /tmp/llm-d-manifests 2>/dev/null || true
-	@cp /tmp/llm-d-manifests/*.yaml $(MANIFEST_DIR)/ 2>/dev/null || true
-	@rm -rf /tmp/llm-d-manifests
-	@echo "Manifests cloned from $(MANIFEST_REF)"
+	@git clone --depth 1 --branch $(MANIFEST_REF) $(MANIFEST_REPO) /tmp/llm-d-manifests
+	@COMMIT=$$(git -C /tmp/llm-d-manifests rev-parse HEAD); \
+	cp /tmp/llm-d-manifests/*.yaml $(MANIFEST_DIR)/; \
+	printf 'branch: %s\nrepo: %s\ncommit: %s\ndate: %s\n' \
+		"$(MANIFEST_REF)" "$(MANIFEST_REPO)" "$$COMMIT" "$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+		> $(MANIFEST_DIR)/.manifest-ref; \
+	rm -rf /tmp/llm-d-manifests; \
+	echo "Manifests ready (branch: $(MANIFEST_REF), commit: $${COMMIT:0:8})"
 
 .PHONY: sync
 sync: ## Install dependencies with uv
@@ -107,6 +111,11 @@ format: ## Format code with ruff
 
 .PHONY: testcases
 testcases: ## List available test cases
+	@if [ -f $(MANIFEST_DIR)/.manifest-ref ]; then \
+		echo "Manifests:"; cat $(MANIFEST_DIR)/.manifest-ref | sed 's/^/  /'; echo; \
+	else \
+		echo "Manifests: not set up (run make setup)"; echo; \
+	fi
 	@echo "Test cases:"
 	@for f in $(TESTCASE_DIR)/*.yaml; do \
 		name=$$(grep '^name:' $$f | head -1 | sed 's/name: *//'); \
@@ -116,6 +125,11 @@ testcases: ## List available test cases
 
 .PHONY: profiles
 profiles: ## List available profiles
+	@if [ -f $(MANIFEST_DIR)/.manifest-ref ]; then \
+		echo "Manifests:"; cat $(MANIFEST_DIR)/.manifest-ref | sed 's/^/  /'; echo; \
+	else \
+		echo "Manifests: not set up (run make setup)"; echo; \
+	fi
 	@echo "Profiles:"
 	@for f in configs/profiles/*.yaml; do \
 		name=$$(grep '^name:' $$f | head -1 | sed 's/name: *//'); \

@@ -136,3 +136,10 @@ def no_cleanup(request) -> bool:
 @pytest.fixture(scope="session")
 def test_mode(request) -> str:
     return request.config.getoption("--mode")
+
+
+@pytest.fixture(scope="session")
+def mock_mode(request) -> bool:
+    return bool(request.config.getoption("--mock"))
+
+

@@ -221,38 +221,62 @@ class Scraper:
 
 def validate_vllm_basic(results: list[ScrapeResult]) -> list[CheckResult]:
     checks = []
+    total = 0.0
     for r in results:
         val = r.get(VLLM_REQUEST_SUCCESS)
+        if val is not None:
+            total += val
         checks.append(CheckResult(
             name="request_success", metric=VLLM_REQUEST_SUCCESS, source=r.source,
-            value=val or 0, passed=val is not None and val > 0,
-            message=f"request_success={val}" if val else "metric not found",
+            value=val or 0, passed=True,
+            message=f"request_success={val}" if val else "no traffic on this pod",
         ))
+    checks.append(CheckResult(
+        name="request_success_aggregate", metric=VLLM_REQUEST_SUCCESS, source="all-pods",
+        value=total, passed=total > 0,
+        message=f"aggregate request_success={total}",
+    ))
     return checks
 
 
 def validate_cache_aware(vllm: list[ScrapeResult], epp: list[ScrapeResult]) -> list[CheckResult]:
     checks = validate_vllm_basic(vllm)
+    total_queries = 0.0
+    total_hits = 0.0
     for r in vllm:
         queries = r.get(VLLM_PREFIX_QUERIES, VLLM_PREFIX_QUERIES_ALT)
         hits = r.get(VLLM_PREFIX_HITS, VLLM_PREFIX_HITS_ALT)
+        if queries is not None:
+            total_queries += queries
+        if hits is not None:
+            total_hits += hits
         checks.append(CheckResult(
             name="prefix_queries", metric=VLLM_PREFIX_QUERIES, source=r.source,
-            value=queries or 0, passed=queries is not None and queries > 0,
-            message=f"prefix_queries={queries}",
+            value=queries or 0, passed=True,
+            message=f"prefix_queries={queries}" if queries is not None else "no traffic on this pod",
         ))
         checks.append(CheckResult(
             name="prefix_hits", metric=VLLM_PREFIX_HITS, source=r.source,
-            value=hits or 0, passed=hits is not None and hits > 0,
-            message=f"prefix_hits={hits}",
+            value=hits or 0, passed=True,
+            message=f"prefix_hits={hits}" if hits is not None else "no traffic on this pod",
         ))
-        if queries and hits:
-            rate = hits / queries * 100
-            checks.append(CheckResult(
-                name="prefix_hit_rate", metric="prefix_cache_hit_rate", source=r.source,
-                value=rate, passed=rate > 0,
-                message=f"hit_rate={rate:.1f}%",
-            ))
+    checks.append(CheckResult(
+        name="prefix_queries_aggregate", metric=VLLM_PREFIX_QUERIES, source="all-pods",
+        value=total_queries, passed=total_queries > 0,
+        message=f"aggregate prefix_queries={total_queries}",
+    ))
+    checks.append(CheckResult(
+        name="prefix_hits_aggregate", metric=VLLM_PREFIX_HITS, source="all-pods",
+        value=total_hits, passed=total_hits > 0,
+        message=f"aggregate prefix_hits={total_hits}",
+    ))
+    if total_queries > 0:
+        rate = total_hits / total_queries * 100
+        checks.append(CheckResult(
+            name="prefix_hit_rate", metric="prefix_cache_hit_rate", source="all-pods",
+            value=rate, passed=rate > 0,
+            message=f"aggregate hit_rate={rate:.1f}%",
+        ))
     return checks
 
 

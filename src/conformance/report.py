@@ -22,6 +22,18 @@ class TestResult:
     model: str = ""
 
 
+def load_manifest_ref(manifest_dir: str = "deploy/manifests") -> dict:
+    ref_file = Path(manifest_dir) / ".manifest-ref"
+    if not ref_file.exists():
+        return {}
+    info = {}
+    for line in ref_file.read_text().splitlines():
+        if ": " in line:
+            k, v = line.split(": ", 1)
+            info[k.strip()] = v.strip()
+    return info
+
+
 @dataclass
 class Report:
     suite: str = "llm-d-e2e"
@@ -40,6 +52,7 @@ class Report:
             "suite": self.suite,
             "profile": self.profile,
             "platform": self.platform,
+            "manifests": load_manifest_ref(),
             "start_time": self.start_time,
             "end_time": end_time,
             "results": [asdict(r) for r in self.results],

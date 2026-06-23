@@ -144,7 +144,7 @@ class TestConformance:
         failed = [c for c in checks if not c.passed]
         assert not failed, f"vLLM metric checks failed: {[c.message for c in failed]}"
 
-    def test_11_metrics_cache(self, scraper: Scraper, tc: TestCase):
+    def test_11_metrics_cache(self, scraper: Scraper, tc: TestCase, mock_mode: bool):
         """Prefix cache metrics should show hits."""
         mc = tc.validation.metrics_check
         if not mc.enabled or not mc.check_prefix_cache:
@@ -155,8 +155,16 @@ class TestConformance:
         checks = validate_cache_aware(vllm, epp)
         for c in checks:
             _log(f"  {c.name}: {'PASS' if c.passed else 'FAIL'} — {c.message}")
-        failed = [c for c in checks if not c.passed]
-        assert not failed, f"Cache metric checks failed: {[c.message for c in failed]}"
+        if mock_mode:
+            hit_checks = {"prefix_hits_aggregate", "prefix_hit_rate"}
+            hard_fail = [c for c in checks if not c.passed and c.name not in hit_checks]
+            soft_fail = [c for c in checks if not c.passed and c.name in hit_checks]
+            if soft_fail:
+                _log(f"WARN: {len(soft_fail)} cache hit metric(s) zero — expected in mock (EPP has no real KV state for routing)")
+            assert not hard_fail, f"Cache metric checks failed: {[c.message for c in hard_fail]}"
+        else:
+            failed = [c for c in checks if not c.passed]
+            assert not failed, f"Cache metric checks failed: {[c.message for c in failed]}"
 
     def test_12_metrics_pd(self, scraper: Scraper, tc: TestCase):
         """P/D metrics should show token distribution."""

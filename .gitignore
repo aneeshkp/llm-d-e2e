@@ -10,3 +10,5 @@ reports/*.json
 reports/*.html
 deploy/manifests/*.yaml
 .work/
+deploy/*
+report.html
