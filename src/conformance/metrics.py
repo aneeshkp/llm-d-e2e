@@ -35,6 +35,12 @@ SCHED_REQUEST_ERROR = "inference_objective_request_error_total"
 POOL_READY_PODS = "inference_pool_ready_pods"
 PREFIX_INDEXER_SIZE = "inference_extension_prefix_indexer_size"
 
+# Flow Control metrics
+FC_DISPATCH_CYCLE = "inference_extension_flow_control_dispatch_cycle_duration_seconds_count"
+FC_POOL_SATURATION = "inference_extension_flow_control_pool_saturation"
+FC_REQUEST_ENQUEUE = "inference_extension_flow_control_request_enqueue_duration_seconds_count"
+FC_QUEUE_DURATION = "inference_extension_flow_control_request_queue_duration_seconds_count"
+
 # Label patterns for pod discovery
 WORKLOAD_LABEL = "app.kubernetes.io/name={name},app.kubernetes.io/component=llminferenceservice-workload"
 PREFILL_LABEL = "app.kubernetes.io/name={name},app.kubernetes.io/component=llminferenceservice-workload-prefill"
@@ -323,4 +329,35 @@ def validate_scheduler(epp: list[ScrapeResult]) -> list[CheckResult]:
                 value=pods, passed=pods > 0,
                 message=f"ready_pods={pods}",
             ))
+    return checks
+
+
+def validate_flow_control(epp: list[ScrapeResult]) -> list[CheckResult]:
+    """Validate flow control metrics from EPP pods."""
+    checks = []
+    for r in epp:
+        dispatch = r.get(FC_DISPATCH_CYCLE)
+        checks.append(CheckResult(
+            name="fc_dispatch_cycle", metric=FC_DISPATCH_CYCLE, source=r.source,
+            value=dispatch or 0, passed=dispatch is not None and dispatch > 0,
+            message=f"dispatch_cycle_count={dispatch}",
+        ))
+        saturation = r.get(FC_POOL_SATURATION)
+        checks.append(CheckResult(
+            name="fc_pool_saturation", metric=FC_POOL_SATURATION, source=r.source,
+            value=saturation or 0, passed=saturation is not None,
+            message=f"pool_saturation={saturation}",
+        ))
+        enqueue = r.get(FC_REQUEST_ENQUEUE)
+        checks.append(CheckResult(
+            name="fc_request_enqueue", metric=FC_REQUEST_ENQUEUE, source=r.source,
+            value=enqueue or 0, passed=enqueue is not None and enqueue > 0,
+            message=f"request_enqueue_count={enqueue}",
+        ))
+        dispatched = r.get(FC_QUEUE_DURATION)
+        checks.append(CheckResult(
+            name="fc_request_dispatched", metric=FC_QUEUE_DURATION, source=r.source,
+            value=dispatched or 0, passed=dispatched is not None and dispatched > 0,
+            message=f"request_queue_dispatched_count={dispatched}",
+        ))
     return checks

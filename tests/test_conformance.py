@@ -26,6 +26,7 @@ from conformance.deployer import Deployer
 from conformance.metrics import (
     Scraper,
     validate_cache_aware,
+    validate_flow_control,
     validate_pd,
     validate_scheduler,
     validate_vllm_basic,
@@ -194,6 +195,21 @@ class TestConformance:
             _log(f"  {c.name}: {'PASS' if c.passed else 'FAIL'} — {c.message}")
         failed = [c for c in checks if not c.passed]
         assert not failed, f"Scheduler metric checks failed: {[c.message for c in failed]}"
+
+    def test_14_metrics_flow_control(self, scraper: Scraper, tc: TestCase):
+        """Flow control metrics should show dispatch activity."""
+        mc = tc.validation.metrics_check
+        if not mc.enabled or not mc.check_flow_control:
+            pytest.skip("flow control metrics check disabled")
+        _log("Scraping flow control metrics...")
+        epp = scraper.scrape_epp(tc.name)
+        _log(f"Scraped {len(epp)} EPP pod(s)")
+        assert epp, "No EPP metrics scraped"
+        checks = validate_flow_control(epp)
+        for c in checks:
+            _log(f"  {c.name}: {'PASS' if c.passed else 'FAIL'} — {c.message}")
+        failed = [c for c in checks if not c.passed]
+        assert not failed, f"Flow control metric checks failed: {[c.message for c in failed]}"
 
     def test_99_cleanup(self, deployer: Deployer, tc: TestCase, no_cleanup: bool):
         """Clean up deployed resources."""

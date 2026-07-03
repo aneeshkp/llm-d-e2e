@@ -1,0 +1,8 @@
+name: flow-control
+description: "Flow control conformance tests — utilization-detector and token-based concurrency-detector"
+platform: any
+testCases:
+  - flow-control
+  - flow-control-tokens
+parallel: false
+timeout: 30m

@@ -7,5 +7,7 @@ testCases:
   - cache-aware
   - pd
   - pd-cache-aware
+  - flow-control
+  - flow-control-tokens
 parallel: false
 timeout: 120m
