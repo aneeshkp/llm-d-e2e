@@ -7,6 +7,7 @@ model:
   category: performance
   cache:
     enabled: true
+    pvcName: model-cache-pvc
     storageSize: 500Gi
     keepPVC: true
     timeout: 90m
