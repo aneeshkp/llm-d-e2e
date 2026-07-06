@@ -26,6 +26,7 @@ from conformance.deployer import Deployer
 from conformance.metrics import (
     Scraper,
     validate_cache_aware,
+    validate_flow_control,
     validate_pd,
     validate_scheduler,
     validate_vllm_basic,
@@ -144,11 +145,12 @@ class TestConformance:
         failed = [c for c in checks if not c.passed]
         assert not failed, f"vLLM metric checks failed: {[c.message for c in failed]}"
 
-    def test_11_metrics_cache(self, scraper: Scraper, tc: TestCase, mock_mode: bool):
+    def test_11_metrics_cache(self, deployer: Deployer, scraper: Scraper, tc: TestCase, mock_mode: bool):
         """Prefix cache metrics should show hits."""
         mc = tc.validation.metrics_check
         if not mc.enabled or not mc.check_prefix_cache:
             pytest.skip("prefix cache check disabled")
+        deployer.ensure_metrics_rbac(tc.name)
         _log("Scraping cache-aware metrics...")
         vllm = scraper.scrape_vllm(tc.name)
         epp = scraper.scrape_epp(tc.name)
@@ -180,11 +182,12 @@ class TestConformance:
         failed = [c for c in checks if not c.passed]
         assert not failed, f"P/D metric checks failed: {[c.message for c in failed]}"
 
-    def test_13_metrics_scheduler(self, scraper: Scraper, tc: TestCase):
+    def test_13_metrics_scheduler(self, deployer: Deployer, scraper: Scraper, tc: TestCase):
         """Scheduler/EPP metrics should show processed requests."""
         mc = tc.validation.metrics_check
         if not mc.enabled or not mc.check_scheduler:
             pytest.skip("scheduler metrics check disabled")
+        deployer.ensure_metrics_rbac(tc.name)
         _log("Scraping scheduler/EPP metrics...")
         epp = scraper.scrape_epp(tc.name)
         _log(f"Scraped {len(epp)} EPP pod(s)")
@@ -194,6 +197,22 @@ class TestConformance:
             _log(f"  {c.name}: {'PASS' if c.passed else 'FAIL'} — {c.message}")
         failed = [c for c in checks if not c.passed]
         assert not failed, f"Scheduler metric checks failed: {[c.message for c in failed]}"
+
+    def test_14_metrics_flow_control(self, deployer: Deployer, scraper: Scraper, tc: TestCase):
+        """Flow control metrics should show dispatch activity."""
+        mc = tc.validation.metrics_check
+        if not mc.enabled or not mc.check_flow_control:
+            pytest.skip("flow control metrics check disabled")
+        deployer.ensure_metrics_rbac(tc.name)
+        _log("Scraping flow control metrics...")
+        epp = scraper.scrape_epp(tc.name)
+        _log(f"Scraped {len(epp)} EPP pod(s)")
+        assert epp, "No EPP metrics scraped"
+        checks = validate_flow_control(epp)
+        for c in checks:
+            _log(f"  {c.name}: {'PASS' if c.passed else 'FAIL'} — {c.message}")
+        failed = [c for c in checks if not c.passed]
+        assert not failed, f"Flow control metric checks failed: {[c.message for c in failed]}"
 
     def test_99_cleanup(self, deployer: Deployer, tc: TestCase, no_cleanup: bool):
         """Clean up deployed resources."""

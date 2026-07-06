@@ -68,6 +68,7 @@ class MetricsCheck:
     check_prefix_cache: bool = False
     check_pd: bool = False
     check_scheduler: bool = False
+    check_flow_control: bool = False
     check_nixl: bool = False
 
 
