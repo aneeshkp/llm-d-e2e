@@ -112,6 +112,7 @@ This skips the deploy and cleanup phases — only runs health, models, inference
 | multi-pool | 2 | Multiple InferencePools |
 | flow-control | 1 | Flow control with utilization-based saturation detector |
 | flow-control-tokens | 1 | Flow control with token-based concurrency detector |
+| pd-performance | 16 | P/D benchmark with GuideLLM (4 prefill + 2 decode, NIXL, RDMA) |
 
 ## Test Phases
 
@@ -128,6 +129,66 @@ Each test case runs through ordered phases:
 9. **Inference** — POST /v1/chat/completions
 10. **Metrics** — scrape and validate Prometheus metrics
 11. **Cleanup** — delete resources
+
+## P/D Performance Benchmark
+
+The `pd-performance` test case runs a [GuideLLM](https://github.com/vllm-project/guidellm) benchmark against a P/D disaggregated deployment (gpt-oss-120b) and validates performance thresholds and NIXL transfer metrics.
+
+### Requirements
+
+- 16 GPUs: 2 decode nodes (4 GPU each, TP=4) + 4 prefill nodes (2 GPU each, TP=2)
+- RDMA/InfiniBand networking (`rdma/ib` resource)
+- Pre-created PVC `model-cache-pvc` with the model downloaded (500Gi)
+
+### Pre-cache the model
+
+```bash
+e2e -t pd-performance --mode cache
+```
+
+This creates the `model-cache-pvc` PVC and downloads `openai/gpt-oss-120b` from HuggingFace.
+
+### Run the benchmark
+
+```bash
+# Full run: deploy → conformance phases → benchmark → post-benchmark metrics → cleanup
+e2e -t pd-performance
+
+# With node placement control
+e2e -t pd-performance \
+  --decode-node-selector gpu-type=a100-80g \
+  --prefill-node-selector gpu-type=a100-40g
+
+# Override the GuideLLM image
+e2e -t pd-performance --guidellm-image ghcr.io/vllm-project/guidellm:v0.7.0
+
+# Keep resources for debugging
+e2e -t pd-performance --nocleanup
+```
+
+### What the benchmark validates
+
+| Check | Threshold |
+|-------|-----------|
+| Output tokens/s | >= 8000 |
+| TTFT median | <= 2000 ms |
+| TTFT p95 | <= 5000 ms |
+| ITL median | <= 50 ms |
+| ITL p95 | <= 100 ms |
+| Failed request ratio | <= 5% |
+| NIXL transfers | > 0 (KV transfer happened) |
+| NIXL failed transfers | == 0 |
+| Decode KV transfer > local compute | P/D topology is working |
+
+Thresholds are configurable in `configs/testcases/pd-performance.yaml` under `validation.benchmark.thresholds`.
+
+### Benchmark phases
+
+The benchmark adds three phases after the standard conformance checks:
+
+- **test_12** — Pre-benchmark P/D metrics (raw metric dump for baseline)
+- **test_20** — GuideLLM benchmark (warmup + main run + threshold assertions)
+- **test_21** — Post-benchmark P/D metrics (validates NIXL transfers after load)
 
 ## Development
 
