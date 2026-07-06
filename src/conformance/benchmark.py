@@ -61,8 +61,9 @@ class BenchmarkResult:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
-def _build_command(target_url: str, model: str, rate: int, max_seconds: int,
-                   data: str, backend_type: str, request_type: str) -> str:
+def _build_command(
+    target_url: str, model: str, rate: int, max_seconds: int, data: str, backend_type: str, request_type: str
+) -> str:
     model_arg = f" --model={model}" if model else ""
     return (
         f"/opt/app-root/bin/guidellm benchmark"
@@ -132,15 +133,25 @@ def run_benchmark(
     return result
 
 
-def _wait_for_job(kubectl_fn: Callable[..., str], name: str, namespace: str,
-                  timeout: float, print_fn: Callable[[str], None] | None = None) -> None:
+def _wait_for_job(
+    kubectl_fn: Callable[..., str],
+    name: str,
+    namespace: str,
+    timeout: float,
+    print_fn: Callable[[str], None] | None = None,
+) -> None:
     deadline = time.time() + timeout
     start = time.time()
     while time.time() < deadline:
         elapsed = int(time.time() - start)
         status = kubectl_fn(
-            "get", "job", name, "-n", namespace,
-            "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}",
+            "get",
+            "job",
+            name,
+            "-n",
+            namespace,
+            "-o",
+            "jsonpath={.status.conditions[?(@.type=='Complete')].status}",
             check=False,
         )
         if status == "True":
@@ -149,14 +160,24 @@ def _wait_for_job(kubectl_fn: Callable[..., str], name: str, namespace: str,
             return
 
         failed = kubectl_fn(
-            "get", "job", name, "-n", namespace,
-            "-o", "jsonpath={.status.conditions[?(@.type=='Failed')].status}",
+            "get",
+            "job",
+            name,
+            "-n",
+            namespace,
+            "-o",
+            "jsonpath={.status.conditions[?(@.type=='Failed')].status}",
             check=False,
         )
         if failed == "True":
             reason = kubectl_fn(
-                "get", "job", name, "-n", namespace,
-                "-o", "jsonpath={.status.conditions[?(@.type=='Failed')].reason}",
+                "get",
+                "job",
+                name,
+                "-n",
+                namespace,
+                "-o",
+                "jsonpath={.status.conditions[?(@.type=='Failed')].reason}",
                 check=False,
             )
             raise RuntimeError(f"Benchmark job '{name}' failed: {reason}")
@@ -170,9 +191,14 @@ def _wait_for_job(kubectl_fn: Callable[..., str], name: str, namespace: str,
 
 def _get_job_logs(kubectl_fn: Callable[..., str], name: str, namespace: str) -> str:
     pod_name = kubectl_fn(
-        "get", "pods", "-n", namespace,
-        "-l", f"job-name={name}",
-        "-o", "jsonpath={.items[0].metadata.name}",
+        "get",
+        "pods",
+        "-n",
+        namespace,
+        "-l",
+        f"job-name={name}",
+        "-o",
+        "jsonpath={.items[0].metadata.name}",
     )
     if not pod_name:
         raise RuntimeError(f"No pod found for job {name}")

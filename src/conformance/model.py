@@ -88,8 +88,13 @@ class ModelDownloader:
 
         try:
             existing = self._kubectl(
-                "get", "pvc", pvc_name, "-n", self.namespace,
-                "-o", "jsonpath={.metadata.name}",
+                "get",
+                "pvc",
+                pvc_name,
+                "-n",
+                self.namespace,
+                "-o",
+                "jsonpath={.metadata.name}",
             )
             if existing and cache.keep_pvc:
                 log.info("PVC %s already exists, reusing", pvc_name)
@@ -103,8 +108,10 @@ class ModelDownloader:
         self._kubectl("apply", "-f", "-", input_data=pvc_yaml)
 
         job_yaml = JOB_TEMPLATE.format(
-            safe_name=safe_name, namespace=self.namespace,
-            model_name=tc.model.name, pvc_name=pvc_name,
+            safe_name=safe_name,
+            namespace=self.namespace,
+            model_name=tc.model.name,
+            pvc_name=pvc_name,
         )
         self._kubectl("apply", "-f", "-", input_data=job_yaml)
 
@@ -112,8 +119,13 @@ class ModelDownloader:
         deadline = time.time() + timeout
         while time.time() < deadline:
             status = self._kubectl(
-                "get", "job", f"model-cache-{safe_name}", "-n", self.namespace,
-                "-o", "jsonpath={.status.conditions[0].type}",
+                "get",
+                "job",
+                f"model-cache-{safe_name}",
+                "-n",
+                self.namespace,
+                "-o",
+                "jsonpath={.status.conditions[0].type}",
             )
             if status == "Complete":
                 result.status = "ready"

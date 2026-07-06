@@ -93,9 +93,7 @@ class TestConformance:
         _log(f"Waiting for pods to be Running (timeout: {timeout:.0f}s)")
         pods = deployer.wait_for_pods(tc.name, timeout=timeout, print_fn=_log)
         _log(f"All pods running: {', '.join(pods)}")
-        assert len(pods) >= tc.deployment.replicas, (
-            f"Expected {tc.deployment.replicas} pods, got {len(pods)}"
-        )
+        assert len(pods) >= tc.deployment.replicas, f"Expected {tc.deployment.replicas} pods, got {len(pods)}"
 
     def test_06_ready(self, deployer: Deployer, tc: TestCase):
         """LLMInferenceService should become Ready."""
@@ -176,7 +174,9 @@ class TestConformance:
             hard_fail = [c for c in checks if not c.passed and c.name not in hit_checks]
             soft_fail = [c for c in checks if not c.passed and c.name in hit_checks]
             if soft_fail:
-                _log(f"WARN: {len(soft_fail)} cache hit metric(s) zero — expected in mock (EPP has no real KV state for routing)")
+                _log(
+                    f"WARN: {len(soft_fail)} cache hit metric(s) zero — expected in mock (EPP has no real KV state for routing)"
+                )
             assert not hard_fail, f"Cache metric checks failed: {[c.message for c in hard_fail]}"
         else:
             failed = [c for c in checks if not c.passed]
@@ -265,8 +265,10 @@ class TestConformance:
                 job_name="guidellm-warmup",
                 print_fn=lambda msg: _log(f"[WARMUP] {msg}"),
             )
-            _log(f"[WARMUP] done — {warmup.completed_requests}/{warmup.total_requests} completed, "
-                 f"otps={warmup.output_tokens_per_second:.1f}")
+            _log(
+                f"[WARMUP] done — {warmup.completed_requests}/{warmup.total_requests} completed, "
+                f"otps={warmup.output_tokens_per_second:.1f}"
+            )
 
         _log(f"Running GuideLLM benchmark against {target_url}")
         _log(f"rate={bc.rate}, max_seconds={bc.max_seconds}, image={image}")
@@ -292,7 +294,9 @@ class TestConformance:
 
         t = bc.thresholds
         failures = []
-        if not _check_threshold("output tokens/s", result.output_tokens_per_second, min_value=t.min_output_tokens_per_second):
+        if not _check_threshold(
+            "output tokens/s", result.output_tokens_per_second, min_value=t.min_output_tokens_per_second
+        ):
             failures.append(f"output tokens/s={result.output_tokens_per_second:.1f} < {t.min_output_tokens_per_second}")
         if not _check_threshold("TTFT median (ms)", result.ttft_median, max_value=t.max_ttft_median_ms):
             failures.append(f"TTFT median={result.ttft_median:.1f}ms > {t.max_ttft_median_ms}ms")
