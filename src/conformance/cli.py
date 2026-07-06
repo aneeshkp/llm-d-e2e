@@ -32,10 +32,15 @@ def main():
     parser.add_argument("--model", default="", help="Override model name")
     parser.add_argument("--endpoint", default="", help="Service URL for discover mode")
     parser.add_argument(
-        "--mock", default="", nargs="?", const=DEFAULT_MOCK_IMAGE,
+        "--mock",
+        default="",
+        nargs="?",
+        const=DEFAULT_MOCK_IMAGE,
         help=f"Use simulator image (no GPU needed). Default: {DEFAULT_MOCK_IMAGE}",
     )
-    parser.add_argument("--render-image", default="", help="vLLM CPU image for tokenizer render sidecar (used with --mock)")
+    parser.add_argument(
+        "--render-image", default="", help="vLLM CPU image for tokenizer render sidecar (used with --mock)"
+    )
 
     # Auth
     parser.add_argument("--pull-secret", default="", help="Pull secret name")
@@ -45,6 +50,13 @@ def main():
     # Storage
     parser.add_argument("--storage-class", default="", help="StorageClass for PVC")
     parser.add_argument("--storage-size", default="", help="Override PVC size")
+
+    # Benchmark
+    parser.add_argument("--guidellm-image", default="", help="GuideLLM benchmark image override")
+
+    # Node placement
+    parser.add_argument("--decode-node-selector", default="", help="Node selector for decode pods (key=value)")
+    parser.add_argument("--prefill-node-selector", default="", help="Node selector for prefill pods (key=value)")
 
     # Behavior
     parser.add_argument("--nocleanup", action="store_true", help="Keep resources after test")
@@ -56,8 +68,9 @@ def main():
     # Utility subcommands
     parser.add_argument("--list-testcases", action="store_true", help="List available test cases")
     parser.add_argument("--list-profiles", action="store_true", help="List available profiles")
-    parser.add_argument("--setup", default="", metavar="REF", nargs="?", const="main",
-                        help="Clone manifest repo (default branch: main)")
+    parser.add_argument(
+        "--setup", default="", metavar="REF", nargs="?", const="main", help="Clone manifest repo (default branch: main)"
+    )
 
     args = parser.parse_args()
 
@@ -96,6 +109,9 @@ def main():
         "storage_class": "--storage-class",
         "storage_size": "--storage-size",
         "report_dir": "--report-dir",
+        "guidellm_image": "--guidellm-image",
+        "decode_node_selector": "--decode-node-selector",
+        "prefill_node_selector": "--prefill-node-selector",
     }
 
     for attr, flag in flag_map.items():
@@ -121,6 +137,7 @@ def main():
 
 def _list_testcases(testcase_dir: str):
     import yaml
+
     ref_file = Path("deploy/manifests/.manifest-ref")
     if ref_file.exists():
         info = ref_file.read_text().strip()
@@ -140,6 +157,7 @@ def _list_testcases(testcase_dir: str):
 
 def _list_profiles():
     import yaml
+
     ref_file = Path("deploy/manifests/.manifest-ref")
     if ref_file.exists():
         info = ref_file.read_text().strip()
@@ -168,7 +186,8 @@ def _setup_manifests(ref: str):
     print(f"Cloning manifests from {ref}...")
     result = subprocess.run(
         ["git", "clone", "--depth", "1", "--branch", ref, repo, "/tmp/llm-d-manifests"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         print(f"Failed to clone manifests: {result.stderr.strip()}")
@@ -176,7 +195,8 @@ def _setup_manifests(ref: str):
 
     commit = subprocess.run(
         ["git", "-C", "/tmp/llm-d-manifests", "rev-parse", "HEAD"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     ).stdout.strip()
 
     for f in Path("/tmp/llm-d-manifests").glob("*.yaml"):

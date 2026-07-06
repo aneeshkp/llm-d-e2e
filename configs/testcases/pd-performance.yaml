@@ -1,0 +1,63 @@
+name: pd-performance
+description: "P/D performance benchmark — gpt-oss-120b with GuideLLM at high concurrency"
+model:
+  name: openai/gpt-oss-120b
+  uri: hf://openai/gpt-oss-120b
+  displayName: gpt-oss-120b-pd
+  category: performance
+  cache:
+    enabled: true
+    pvcName: model-cache-pvc
+    storageSize: 500Gi
+    keepPVC: true
+    timeout: 90m
+deployment:
+  manifestPath: pd-performance.yaml
+  replicas: 2
+  readyTimeout: 15m
+  resources:
+    cpu: "16"
+    memory: 64Gi
+    gpus: 4
+    rdma: true
+  prefill:
+    replicas: 2
+    resources:
+      cpu: "16"
+      memory: 64Gi
+      gpus: 4
+      rdma: true
+validation:
+  healthEndpoint: /health
+  healthPort: 8000
+  healthScheme: HTTPS
+  inferenceCheck: true
+  testPrompts:
+    - "What is Kubernetes?"
+  expectedCodes: [200]
+  timeout: 5m
+  retryAttempts: 5
+  retryInterval: 30s
+  metricsCheck:
+    enabled: true
+    checkVLLM: true
+    checkPD: true
+    checkNIXL: true
+    checkScheduler: true
+  benchmark:
+    enabled: true
+    image: ghcr.io/vllm-project/guidellm:v0.6.0
+    rate: 200
+    maxSeconds: 240
+    data: "prompt_tokens=8000,prompt_tokens_stdev=8500,prompt_tokens_min=50,prompt_tokens_max=30000,output_tokens=800,output_tokens_stdev=1500,output_tokens_min=20,output_tokens_max=8000"
+    backendType: openai_http
+    requestType: text_completions
+    timeout: 30m
+    thresholds:
+      minOutputTokensPerSecond: 8000.0
+      maxTtftMedianMs: 2000.0
+      maxTtftP95Ms: 5000.0
+      maxItlMedianMs: 50.0
+      maxItlP95Ms: 100.0
+      maxFailedRatio: 0.05
+cleanup: true

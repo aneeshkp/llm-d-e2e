@@ -45,6 +45,9 @@ def pytest_addoption(parser):
     parser.addoption("--nocleanup", action="store_true", help="Keep resources after test")
     parser.addoption("--storage-class", default="", help="StorageClass for PVC")
     parser.addoption("--storage-size", default="", help="Override PVC size")
+    parser.addoption("--guidellm-image", default="", help="GuideLLM benchmark image override")
+    parser.addoption("--decode-node-selector", default="", help="Node selector for decode pods (key=value)")
+    parser.addoption("--prefill-node-selector", default="", help="Node selector for prefill pods (key=value)")
 
 
 def _resolve_test_cases(config) -> list[TestCase]:
@@ -81,6 +84,8 @@ def deployer(request) -> Deployer:
         render_image=request.config.getoption("--render-image"),
         pull_secret=request.config.getoption("--pull-secret"),
         disable_auth=request.config.getoption("--disable-auth"),
+        decode_node_selector=request.config.getoption("--decode-node-selector"),
+        prefill_node_selector=request.config.getoption("--prefill-node-selector"),
     )
     yield d
     d.stop_port_forward()
@@ -143,3 +148,6 @@ def mock_mode(request) -> bool:
     return bool(request.config.getoption("--mock"))
 
 
+@pytest.fixture(scope="session")
+def guidellm_image(request) -> str:
+    return request.config.getoption("--guidellm-image")

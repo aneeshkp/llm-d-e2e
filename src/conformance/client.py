@@ -33,21 +33,27 @@ class LLMClient:
         return r.json()
 
     def completions(self, model: str, prompt: str, max_tokens: int = 64, temperature: float = 0.1) -> dict:
-        r = self._client.post("/v1/completions", json={
-            "model": model,
-            "prompt": prompt,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        })
+        r = self._client.post(
+            "/v1/completions",
+            json={
+                "model": model,
+                "prompt": prompt,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            },
+        )
         r.raise_for_status()
         return r.json()
 
     def chat(self, model: str, prompt: str, max_tokens: int = 64, temperature: float = 0.1) -> dict:
-        r = self._client.post("/v1/chat/completions", json={
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        })
+        r = self._client.post(
+            "/v1/chat/completions",
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            },
+        )
         r.raise_for_status()
         return r.json()

@@ -21,6 +21,14 @@ WORKLOAD_LABEL = "app.kubernetes.io/name={name},app.kubernetes.io/component=llmi
 PREFILL_LABEL = "app.kubernetes.io/name={name},app.kubernetes.io/component=llminferenceservice-workload-prefill"
 
 
+def _parse_node_selector(value: str) -> dict[str, str]:
+    """Parse 'key=value' into a dict, or return empty dict."""
+    if not value or "=" not in value:
+        return {}
+    k, v = value.split("=", 1)
+    return {k.strip(): v.strip()}
+
+
 @dataclass
 class DeployResult:
     name: str = ""
@@ -45,6 +53,8 @@ class Deployer:
         pull_secret: str = "",
         disable_auth: bool = False,
         manifest_dir: str = "deploy/manifests",
+        decode_node_selector: str = "",
+        prefill_node_selector: str = "",
     ):
         self.kubeconfig = kubeconfig
         self.platform = platform
@@ -55,6 +65,8 @@ class Deployer:
         self.pull_secret = pull_secret
         self.disable_auth = disable_auth
         self.manifest_dir = Path(manifest_dir)
+        self.decode_node_selector = _parse_node_selector(decode_node_selector)
+        self.prefill_node_selector = _parse_node_selector(prefill_node_selector)
         self._port_forward_proc: subprocess.Popen | None = None
         self._port_forward_port: int = 0
         self._pod_pf_proc: subprocess.Popen | None = None
@@ -140,16 +152,26 @@ class Deployer:
         """Patch the inference gateway to allow HTTPRoutes from the test namespace."""
         try:
             allowed = self.kubectl(
-                "get", "gateway", "inference-gateway", "-n", "redhat-ods-applications",
-                "-o", "jsonpath={.spec.listeners[0].allowedRoutes.namespaces.from}",
+                "get",
+                "gateway",
+                "inference-gateway",
+                "-n",
+                "redhat-ods-applications",
+                "-o",
+                "jsonpath={.spec.listeners[0].allowedRoutes.namespaces.from}",
                 check=False,
             )
             if allowed == "All":
                 return
             self.kubectl(
-                "patch", "gateway", "inference-gateway", "-n", "redhat-ods-applications",
+                "patch",
+                "gateway",
+                "inference-gateway",
+                "-n",
+                "redhat-ods-applications",
                 "--type=json",
-                "-p", '[{"op":"replace","path":"/spec/listeners/0/allowedRoutes/namespaces/from","value":"All"}]',
+                "-p",
+                '[{"op":"replace","path":"/spec/listeners/0/allowedRoutes/namespaces/from","value":"All"}]',
             )
             log.info("Patched inference-gateway to allow routes from all namespaces")
         except RuntimeError as e:
@@ -162,8 +184,12 @@ class Deployer:
         try:
             self.kubectl("get", "clusterrolebinding", binding_name, check=False)
             existing = self.kubectl(
-                "get", "clusterrolebinding", binding_name,
-                "-o", "jsonpath={.metadata.name}", check=False,
+                "get",
+                "clusterrolebinding",
+                binding_name,
+                "-o",
+                "jsonpath={.metadata.name}",
+                check=False,
             )
             if existing:
                 return
@@ -171,7 +197,9 @@ class Deployer:
             pass
         try:
             self.kubectl(
-                "create", "clusterrolebinding", binding_name,
+                "create",
+                "clusterrolebinding",
+                binding_name,
                 "--clusterrole=kserve-metrics-reader-cluster-role",
                 f"--serviceaccount={self.namespace}:{sa_name}",
             )
@@ -197,6 +225,44 @@ class Deployer:
         except RuntimeError:
             return False
 
+    def _ensure_clean_slate(self, name: str, timeout: float = 120):
+        """If the LLMInferenceService already exists, delete it and wait for all pods to terminate."""
+        if not self.check_resource_exists("llminferenceservice", name):
+            return
+        log.info("LLMInferenceService '%s' already exists, deleting before redeploy", name)
+        self.cleanup_metrics_rbac(name)
+        self.kubectl(
+            "delete",
+            "llminferenceservice",
+            name,
+            "-n",
+            self.namespace,
+            "--timeout",
+            f"{int(timeout)}s",
+            "--ignore-not-found",
+            check=False,
+        )
+        label = f"app.kubernetes.io/name={name}"
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            output = self.kubectl(
+                "get",
+                "pods",
+                "-n",
+                self.namespace,
+                "-l",
+                label,
+                "-o",
+                "jsonpath={.items[*].metadata.name}",
+                check=False,
+            )
+            if not output.strip():
+                log.info("All pods for '%s' terminated", name)
+                return
+            log.info("Waiting for pods to terminate: %s", output.strip())
+            time.sleep(5)
+        log.warning("Timed out waiting for pods to terminate for '%s'", name)
+
     def deploy(self, tc: TestCase) -> DeployResult:
         start = time.time()
         result = DeployResult(name=tc.name, namespace=self.namespace)
@@ -213,6 +279,7 @@ class Deployer:
 
         try:
             self.ensure_namespace()
+            self._ensure_clean_slate(tc.name)
             for secret_name in self._collect_pull_secrets(manifest):
                 self.ensure_pull_secret(secret_name)
             self.ensure_gateway_allows_namespace()
@@ -238,15 +305,28 @@ class Deployer:
             elapsed = int(time.time() - start)
             try:
                 status = self.kubectl(
-                    "get", "llminferenceservice", name, "-n", self.namespace,
-                    "-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}",
+                    "get",
+                    "llminferenceservice",
+                    name,
+                    "-n",
+                    self.namespace,
+                    "-o",
+                    "jsonpath={.status.conditions[?(@.type=='Ready')].status}",
                     check=False,
                 )
-                reason = self.kubectl(
-                    "get", "llminferenceservice", name, "-n", self.namespace,
-                    "-o", "jsonpath={.status.conditions[?(@.type=='Ready')].reason}",
-                    check=False,
-                ) or "waiting"
+                reason = (
+                    self.kubectl(
+                        "get",
+                        "llminferenceservice",
+                        name,
+                        "-n",
+                        self.namespace,
+                        "-o",
+                        "jsonpath={.status.conditions[?(@.type=='Ready')].reason}",
+                        check=False,
+                    )
+                    or "waiting"
+                )
                 if print_fn:
                     print_fn(f"[{elapsed}s/{int(timeout)}s] Ready={status or 'Unknown'} reason={reason}")
                 if status == "True":
@@ -263,9 +343,14 @@ class Deployer:
         while time.time() < deadline:
             try:
                 output = self.kubectl(
-                    "get", "svc", "-n", self.namespace,
-                    "-l", f"app.kubernetes.io/name={name}",
-                    "-o", "jsonpath={.items[0].metadata.name}",
+                    "get",
+                    "svc",
+                    "-n",
+                    self.namespace,
+                    "-l",
+                    f"app.kubernetes.io/name={name}",
+                    "-o",
+                    "jsonpath={.items[0].metadata.name}",
                     check=False,
                 )
                 if output:
@@ -289,8 +374,11 @@ class Deployer:
         while time.time() < deadline:
             try:
                 output = self.kubectl(
-                    "get", "gateway", "-A",
-                    "-o", "jsonpath={.items[0].status.addresses[0].value}",
+                    "get",
+                    "gateway",
+                    "-A",
+                    "-o",
+                    "jsonpath={.items[0].status.addresses[0].value}",
                     check=False,
                 )
                 if output:
@@ -301,15 +389,21 @@ class Deployer:
         raise TimeoutError(f"Gateway not programmed after {timeout}s")
 
     def wait_for_pods(self, name: str, timeout: float = 600, print_fn=None) -> list[str]:
-        label = WORKLOAD_LABEL.format(name=name)
+        label = f"app.kubernetes.io/name={name}"
         deadline = time.time() + timeout
         start = time.time()
         while time.time() < deadline:
             elapsed = int(time.time() - start)
             try:
                 output = self.kubectl(
-                    "get", "pods", "-n", self.namespace,
-                    "-l", label, "-o", "jsonpath={range .items[*]}{.metadata.name}={.status.phase} {end}",
+                    "get",
+                    "pods",
+                    "-n",
+                    self.namespace,
+                    "-l",
+                    label,
+                    "-o",
+                    "jsonpath={range .items[*]}{.metadata.name}={.status.phase} {end}",
                     check=False,
                 )
                 pod_statuses = output.strip().split() if output.strip() else []
@@ -339,8 +433,12 @@ class Deployer:
         while time.time() < deadline:
             try:
                 output = self.kubectl(
-                    "get", "inferencepool", "-n", self.namespace,
-                    "-o", "jsonpath={.items[*].metadata.name}",
+                    "get",
+                    "inferencepool",
+                    "-n",
+                    self.namespace,
+                    "-o",
+                    "jsonpath={.items[*].metadata.name}",
                     check=False,
                 )
                 if output:
@@ -353,8 +451,13 @@ class Deployer:
     def get_endpoint(self, name: str) -> str:
         try:
             url = self.kubectl(
-                "get", "llminferenceservice", name, "-n", self.namespace,
-                "-o", "jsonpath={.status.url}",
+                "get",
+                "llminferenceservice",
+                name,
+                "-n",
+                self.namespace,
+                "-o",
+                "jsonpath={.status.url}",
             )
             if url:
                 path = url.split("//", 1)[-1].split("/", 1)
@@ -405,8 +508,14 @@ class Deployer:
 
         label = WORKLOAD_LABEL.format(name=name)
         output = self.kubectl(
-            "get", "pods", "-n", self.namespace, "-l", label,
-            "-o", "jsonpath={.items[0].metadata.name}",
+            "get",
+            "pods",
+            "-n",
+            self.namespace,
+            "-l",
+            label,
+            "-o",
+            "jsonpath={.items[0].metadata.name}",
         )
         pod_name = output.strip()
         if not pod_name:
@@ -442,16 +551,29 @@ class Deployer:
         log.info("Cleaning up %s", tc.name)
         self.cleanup_metrics_rbac(tc.name)
         self.kubectl(
-            "delete", "llminferenceservice", tc.name, "-n", self.namespace,
-            "--timeout", f"{int(timeout)}s", "--ignore-not-found",
+            "delete",
+            "llminferenceservice",
+            tc.name,
+            "-n",
+            self.namespace,
+            "--timeout",
+            f"{int(timeout)}s",
+            "--ignore-not-found",
             check=False,
         )
         deadline = time.time() + timeout
-        label = WORKLOAD_LABEL.format(name=tc.name)
+        label = f"app.kubernetes.io/name={tc.name}"
         while time.time() < deadline:
             output = self.kubectl(
-                "get", "pods", "-n", self.namespace, "-l", label,
-                "-o", "jsonpath={.items[*].metadata.name}", check=False,
+                "get",
+                "pods",
+                "-n",
+                self.namespace,
+                "-l",
+                label,
+                "-o",
+                "jsonpath={.items[*].metadata.name}",
+                check=False,
             )
             if not output.strip():
                 return
@@ -468,6 +590,8 @@ class Deployer:
     def _patch_manifest(self, path: Path, tc: TestCase) -> dict:
         with open(path) as f:
             manifest = yaml.safe_load(f)
+
+        manifest.setdefault("metadata", {})["name"] = tc.name
 
         spec = manifest.get("spec", {})
 
@@ -488,6 +612,14 @@ class Deployer:
             annotations = manifest.setdefault("metadata", {}).setdefault("annotations", {})
             annotations["serving.kserve.io/disable-auth"] = "true"
 
+        if self.decode_node_selector:
+            spec.setdefault("template", {})["nodeSelector"] = self.decode_node_selector
+
+        if self.prefill_node_selector:
+            prefill = spec.get("prefill", {})
+            if prefill:
+                prefill.setdefault("template", {})["nodeSelector"] = self.prefill_node_selector
+
         return manifest
 
     def _replace_vllm_image(self, spec: dict, image: str, model_name: str = ""):
@@ -499,19 +631,26 @@ class Deployer:
                     container["command"] = ["/app/llm-d-inference-sim"]
                     sim_model = "sim-model"
                     container["args"] = [
-                        "--model", sim_model,
-                        "--served-model-name", model_name or sim_model,
-                        "--port", "8000",
+                        "--model",
+                        sim_model,
+                        "--served-model-name",
+                        model_name or sim_model,
+                        "--port",
+                        "8000",
                         "--self-signed-certs",
-                        "--mode", "random",
-                        "--enable-kvcache", "true",
+                        "--mode",
+                        "random",
+                        "--enable-kvcache",
+                        "true",
                     ]
                     env_list = container.setdefault("env", [])
                     if not any(e.get("name") == "POD_IP" for e in env_list):
-                        env_list.append({
-                            "name": "POD_IP",
-                            "valueFrom": {"fieldRef": {"fieldPath": "status.podIP"}},
-                        })
+                        env_list.append(
+                            {
+                                "name": "POD_IP",
+                                "valueFrom": {"fieldRef": {"fieldPath": "status.podIP"}},
+                            }
+                        )
                     resources = container.get("resources", {})
                     for section in ("limits", "requests"):
                         resources.get(section, {}).pop("nvidia.com/gpu", None)
