@@ -145,11 +145,12 @@ class TestConformance:
         failed = [c for c in checks if not c.passed]
         assert not failed, f"vLLM metric checks failed: {[c.message for c in failed]}"
 
-    def test_11_metrics_cache(self, scraper: Scraper, tc: TestCase, mock_mode: bool):
+    def test_11_metrics_cache(self, deployer: Deployer, scraper: Scraper, tc: TestCase, mock_mode: bool):
         """Prefix cache metrics should show hits."""
         mc = tc.validation.metrics_check
         if not mc.enabled or not mc.check_prefix_cache:
             pytest.skip("prefix cache check disabled")
+        deployer.ensure_metrics_rbac(tc.name)
         _log("Scraping cache-aware metrics...")
         vllm = scraper.scrape_vllm(tc.name)
         epp = scraper.scrape_epp(tc.name)
@@ -181,11 +182,12 @@ class TestConformance:
         failed = [c for c in checks if not c.passed]
         assert not failed, f"P/D metric checks failed: {[c.message for c in failed]}"
 
-    def test_13_metrics_scheduler(self, scraper: Scraper, tc: TestCase):
+    def test_13_metrics_scheduler(self, deployer: Deployer, scraper: Scraper, tc: TestCase):
         """Scheduler/EPP metrics should show processed requests."""
         mc = tc.validation.metrics_check
         if not mc.enabled or not mc.check_scheduler:
             pytest.skip("scheduler metrics check disabled")
+        deployer.ensure_metrics_rbac(tc.name)
         _log("Scraping scheduler/EPP metrics...")
         epp = scraper.scrape_epp(tc.name)
         _log(f"Scraped {len(epp)} EPP pod(s)")
@@ -196,11 +198,12 @@ class TestConformance:
         failed = [c for c in checks if not c.passed]
         assert not failed, f"Scheduler metric checks failed: {[c.message for c in failed]}"
 
-    def test_14_metrics_flow_control(self, scraper: Scraper, tc: TestCase):
+    def test_14_metrics_flow_control(self, deployer: Deployer, scraper: Scraper, tc: TestCase):
         """Flow control metrics should show dispatch activity."""
         mc = tc.validation.metrics_check
         if not mc.enabled or not mc.check_flow_control:
             pytest.skip("flow control metrics check disabled")
+        deployer.ensure_metrics_rbac(tc.name)
         _log("Scraping flow control metrics...")
         epp = scraper.scrape_epp(tc.name)
         _log(f"Scraped {len(epp)} EPP pod(s)")

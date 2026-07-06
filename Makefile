@@ -97,6 +97,10 @@ test-profile-pd: ## Run P/D disaggregation tests
 test-profile-moe: ## Run MoE/DeepSeek tests
 	uv run pytest $(PYTEST_ARGS) --profile configs/profiles/deepseek.yaml
 
+.PHONY: test-profile-flow-control
+test-profile-flow-control: ## Run flow control tests
+	uv run pytest $(PYTEST_ARGS) --profile configs/profiles/flow-control.yaml
+
 .PHONY: unittest
 unittest: ## Run smoke/unit tests (no cluster needed)
 	uv run pytest tests/test_smoke.py -v

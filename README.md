@@ -110,6 +110,8 @@ This skips the deploy and cleanup phases — only runs health, models, inference
 | pd-cache-aware | 3 | P/D + prefix cache |
 | moe | 8 | MoE, RDMA, expert parallelism |
 | multi-pool | 2 | Multiple InferencePools |
+| flow-control | 1 | Flow control with utilization-based saturation detector |
+| flow-control-tokens | 1 | Flow control with token-based concurrency detector |
 
 ## Test Phases
 
