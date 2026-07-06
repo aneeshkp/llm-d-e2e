@@ -26,12 +26,22 @@ uv run ruff format src/ tests/                        # format
 
 uv run llm-d-e2e -t single-gpu-smoke                  # run single conformance test case
 uv run llm-d-e2e -t single-gpu,cache-aware            # run multiple test cases
-uv run llm-d-e2e -t single-gpu --mock                                    # simulate vLLM (no GPU)
-uv run llm-d-e2e -t single-gpu --mode discover --endpoint http://svc:8000 # validate existing deployment
+uv run llm-d-e2e -t single-gpu --mock                 # simulate vLLM (no GPU)
+uv run llm-d-e2e -t single-gpu --mode discover --endpoint http://svc:8000  # validate existing deployment
+uv run llm-d-e2e -t single-gpu --mode cache           # pre-cache model into PVC then exit
 uv run llm-d-e2e -p configs/profiles/smoke.yaml       # run a profile
 uv run llm-d-e2e -t single-gpu --nocleanup            # keep resources after test
+uv run llm-d-e2e -t single-gpu --html report.html     # generate HTML report
+uv run llm-d-e2e -t single-gpu -x                     # stop on first failure
 uv run llm-d-e2e --list-testcases                     # list available test cases
 uv run llm-d-e2e --list-profiles                      # list available profiles
+
+# Auth / platform
+uv run llm-d-e2e -t single-gpu --platform ocp --pull-secret my-secret --bearer-token $TOKEN
+uv run llm-d-e2e -t single-gpu --disable-auth         # strip WASM auth annotation from manifest
+
+# Run a single conformance phase (by method name prefix)
+uv run pytest tests/test_conformance.py -k "test_09_inference" --testcase single-gpu
 ```
 
 Makefile targets mirror CLI: `make test TESTCASE=single-gpu`, `make unittest`, `make lint`, `make format`, `make setup`.
@@ -64,9 +74,11 @@ Makefile targets mirror CLI: `make test TESTCASE=single-gpu`, `make unittest`, `
 - **model.py** — `ModelDownloader`: creates PVCs and download Jobs for pre-caching models from HuggingFace.
 - **report.py** — JSON report generation with pass/fail/skip summary.
 
-### Model caching (`--model-source pvc`)
+### Model caching (`--model-source pvc` / `--mode cache`)
 
 `model.py:ModelDownloader` creates a PVC and a K8s Job that downloads a HuggingFace model into it. When `--model-source pvc` is set, `deployer.py` switches the model URI from `hf://` to `pvc://` and patches the manifest accordingly. The PVC can be retained across runs (`cache.keepPVC: true` in test case YAML) to avoid re-downloading.
+
+`--mode cache` runs only the model download phase and exits — useful for pre-warming the PVC before a test run.
 
 ### Config files
 
@@ -76,7 +88,9 @@ Makefile targets mirror CLI: `make test TESTCASE=single-gpu`, `make unittest`, `
 
 ### vLLM Simulator (`--mock`)
 
-The `--mock` flag replaces the vLLM container with [llm-d-inference-sim](https://github.com/llm-d/llm-d-inference-sim) (`ghcr.io/llm-d/llm-d-inference-sim:latest`), a Go-based simulator with OpenAI-compatible endpoints, vLLM-compatible Prometheus metrics, configurable latency, and KV cache simulation. When `--mock` is used, `deployer.py:_replace_vllm_image()` patches the manifest to: swap the container image, inject simulator args (`--model`, `--port`, `--self-signed-certs`, `--mode random`), and strip GPU resource requests. A custom image can be passed: `--mock my-image:v1`.
+The `--mock` flag replaces the vLLM container with [llm-d-inference-sim](https://github.com/llm-d/llm-d-inference-sim) (`ghcr.io/llm-d/llm-d-inference-sim:latest`), a Go-based simulator with OpenAI-compatible endpoints, vLLM-compatible Prometheus metrics, configurable latency, and KV cache simulation. When `--mock` is used, `deployer.py:_replace_vllm_image()` patches the manifest to: swap the container image, inject simulator args (`--model`, `--port`, `--self-signed-certs`, `--mode random`, `--enable-kvcache true`), and strip GPU resource requests. A custom image can be passed: `--mock my-image:v1`.
+
+The `--render-image` flag injects a vLLM CPU sidecar for tokenizer rendering alongside the simulator (requires vLLM ≥ 0.19 `vllm launch render`). If not specified, defaults to `vllm/vllm-openai-cpu:v0.19.1`.
 
 ## Adding a New Test Case
 
@@ -92,6 +106,11 @@ The `--mock` flag replaces the vLLM container with [llm-d-inference-sim](https:/
 3. Use camelCase for the key in YAML files.
 4. Duration fields (named `timeout`, `ready_timeout`, `retry_interval`) are auto-parsed from strings like `"15m"`, `"2h"`, `"300s"`.
 
+Existing `DeployConfig` fields that affect manifest patching but are less obvious:
+- `env_overrides: dict[str,str]` — injects extra env vars into the manifest's main container.
+- `network_attach: str` — adds a network attachment annotation (for SR-IOV / RDMA NICs).
+- `worker: bool` — signals the manifest uses a worker topology.
+
 ## Adding a New Conformance Phase
 
 1. Add a method `test_NN_<name>` to `TestConformance` in `test_conformance.py`. Pick a number between existing phases.
@@ -102,20 +121,24 @@ The `--mock` flag replaces the vLLM container with [llm-d-inference-sim](https:/
 
 Each metrics validator in `metrics.py` targets a specific deployment topology:
 
-| Validator               | Scrape target | Test phase | Topology          |
-|------------------------|---------------|------------|--------------------|
-| `validate_vllm_basic`  | workload pods | test_10    | All (basic check)  |
-| `validate_cache_aware` | workload + EPP | test_11   | Prefix KV cache    |
-| `validate_pd`          | workload + prefill | test_12 | P/D disaggregation |
-| `validate_scheduler`   | EPP pods      | test_13    | Scheduler/EPP      |
+| Validator               | Scrape target      | Test phase | Topology           |
+|------------------------|--------------------|------------|--------------------|
+| `validate_vllm_basic`  | workload pods      | test_10    | All (basic check)  |
+| `validate_cache_aware` | workload + EPP     | test_11    | Prefix KV cache    |
+| `validate_pd`          | workload + prefill | test_12    | P/D disaggregation |
+| `validate_scheduler`   | EPP pods           | test_13    | Scheduler/EPP      |
+
+`MetricsCheck.check_nixl` exists in the dataclass for NIXL KV transfer metrics (`nixl:kv_transfer_count_total`) but has no validator method yet — add one in `metrics.py` and wire it up in `test_conformance.py` as `test_14_metrics_nixl`.
 
 EPP pod discovery tries multiple label patterns (`EPP_LABELS` list in `metrics.py`) because the component label varies across llm-d versions.
 
 ### Endpoint routing (gateway vs pod)
 
 Health (`/health`) and models (`/v1/models`) endpoints return 503 when routed through the Gateway API + EPP because the EPP only handles inference requests. The test suite uses two separate port-forwards:
-- **Gateway** (`client` fixture): `localhost → inference-gateway-istio:80` — for `/v1/chat/completions` (test_09)
-- **Pod** (`pod_client` fixture): `localhost → workload-pod:8000` — for `/health` (test_07) and `/v1/models` (test_08)
+- **Gateway** (`client` fixture): `localhost → svc/inference-gateway-istio:80` in namespace `redhat-ods-applications` — for `/v1/chat/completions` (test_09). HTTP.
+- **Pod** (`pod_client` fixture): `localhost → workload-pod:8000` in the test namespace — for `/health` (test_07) and `/v1/models` (test_08). HTTPS (self-signed).
+
+The gateway service name (`inference-gateway-istio`) and its namespace (`redhat-ods-applications`) are hardcoded in `deployer.py:_ensure_port_forward()`. These are RHOAI-specific values; clusters running upstream KServe with a different gateway name will need these changed.
 
 ### EPP metrics auth
 
@@ -131,6 +154,7 @@ EPP pod discovery uses multiple label patterns (`EPP_LABELS` in `metrics.py`) be
 - camelCase in YAML, snake_case in Python — `_snake()` and `_build()` in `config.py` bridge the two.
 - Health/models go directly to pods; inference goes through the gateway — the EPP only routes inference requests.
 - Metrics scraping tries `kubectl exec` first (python3, wget), falls back to port-forward + httpx for minimal container images.
+- Global pytest timeout is 21600s (6 hours) to accommodate slow model downloads and pod startup.
 
 ## Code Style
 
