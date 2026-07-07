@@ -106,6 +106,8 @@ def endpoint(deployer: Deployer, tc: TestCase, request) -> str:
     explicit = request.config.getoption("--endpoint")
     if explicit:
         return explicit
+    if not deployer.is_deployed(tc.name) and request.config.getoption("--mode") != "discover":
+        pytest.skip(f"skipped — deploy failed or was skipped for '{tc.name}'")
     return deployer.get_endpoint(tc.name)
 
 
@@ -117,7 +119,9 @@ def client(endpoint: str, request) -> LLMClient:
 
 
 @pytest.fixture(scope="class")
-def pod_endpoint(deployer: Deployer, tc: TestCase) -> str:
+def pod_endpoint(deployer: Deployer, tc: TestCase, request) -> str:
+    if not deployer.is_deployed(tc.name) and request.config.getoption("--mode") != "discover":
+        pytest.skip(f"skipped — deploy failed or was skipped for '{tc.name}'")
     return deployer.get_pod_endpoint(tc.name)
 
 

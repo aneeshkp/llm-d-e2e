@@ -6,6 +6,7 @@ __pycache__/
 dist/
 build/
 .venv/
+reports/
 reports/*.json
 reports/*.html
 deploy/manifests/*.yaml

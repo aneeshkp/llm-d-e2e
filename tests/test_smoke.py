@@ -59,3 +59,14 @@ def test_llm_client_init():
     c = LLMClient(base_url="http://localhost:8000", bearer_token="test-token")
     assert c._client.headers.get("authorization") == "Bearer test-token"
     c.close()
+
+
+def test_deployer_is_deployed():
+    from conformance.deployer import Deployer
+
+    d = Deployer()
+    assert not d.is_deployed("foo")
+    d._deployed.add("foo")
+    assert d.is_deployed("foo")
+    d._deployed.discard("foo")
+    assert not d.is_deployed("foo")

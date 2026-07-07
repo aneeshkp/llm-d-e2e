@@ -72,6 +72,7 @@ class Deployer:
         self._pod_pf_proc: subprocess.Popen | None = None
         self._pod_pf_port: int = 0
         self._pod_pf_name: str = ""
+        self._deployed: set[str] = set()
         self._render_image_cached: str | None = None
 
     @property
@@ -212,6 +213,9 @@ class Deployer:
         binding_name = f"{self.namespace}-{name}-metrics-reader"
         self.kubectl("delete", "clusterrolebinding", binding_name, "--ignore-not-found", check=False)
 
+    def is_deployed(self, name: str) -> bool:
+        return name in self._deployed
+
     def check_crd_exists(self, crd_name: str) -> bool:
         try:
             self.kubectl("get", "crd", crd_name)
@@ -287,6 +291,7 @@ class Deployer:
             self.kubectl("apply", "-n", self.namespace, "-f", tmp_path)
             self.ensure_metrics_rbac(tc.name)
             result.success = True
+            self._deployed.add(tc.name)
         except RuntimeError as e:
             result.error = str(e)
         finally:
@@ -606,6 +611,7 @@ class Deployer:
 
     def cleanup(self, tc: TestCase, timeout: float = 120):
         log.info("Cleaning up %s", tc.name)
+        self._deployed.discard(tc.name)
         self.cleanup_metrics_rbac(tc.name)
         self.kubectl(
             "delete",

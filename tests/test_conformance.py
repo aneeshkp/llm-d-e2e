@@ -41,6 +41,13 @@ def _log(msg: str, capsys=None):
     print(f"  → {msg}")
 
 
+def _require_deployed(deployer: Deployer, tc: TestCase, test_mode: str) -> None:
+    if test_mode == "discover":
+        return
+    if not deployer.is_deployed(tc.name):
+        pytest.skip(f"skipped — deploy failed or was skipped for '{tc.name}'")
+
+
 def _check_threshold(name: str, value: float, min_value: float | None = None, max_value: float | None = None) -> bool:
     passed = True
     if min_value is not None and value < min_value:
@@ -74,29 +81,33 @@ class TestConformance:
             _log(f"Error: {result.error}")
         assert result.success, f"Deploy failed: {result.error}"
 
-    def test_03_service(self, deployer: Deployer, tc: TestCase):
+    def test_03_service(self, deployer: Deployer, tc: TestCase, test_mode: str):
         """Service should be created for the LLMInferenceService."""
+        _require_deployed(deployer, tc, test_mode)
         _log(f"Waiting for Service for '{tc.name}'...")
         svc = deployer.wait_for_service(tc.name)
         _log(f"Service found: {svc}")
 
-    def test_04_gateway(self, deployer: Deployer, tc: TestCase):
+    def test_04_gateway(self, deployer: Deployer, tc: TestCase, test_mode: str):
         """Gateway should be programmed with an address."""
+        _require_deployed(deployer, tc, test_mode)
         _log("Waiting for Gateway to be programmed...")
         addr = deployer.wait_for_gateway()
         _log(f"Gateway address: {addr}")
         assert addr, "Gateway has no address"
 
-    def test_05_pods(self, deployer: Deployer, tc: TestCase):
+    def test_05_pods(self, deployer: Deployer, tc: TestCase, test_mode: str):
         """Pods should be Running without crashes."""
+        _require_deployed(deployer, tc, test_mode)
         timeout = tc.deployment.ready_timeout.total_seconds()
         _log(f"Waiting for pods to be Running (timeout: {timeout:.0f}s)")
         pods = deployer.wait_for_pods(tc.name, timeout=timeout, print_fn=_log)
         _log(f"All pods running: {', '.join(pods)}")
         assert len(pods) >= tc.deployment.replicas, f"Expected {tc.deployment.replicas} pods, got {len(pods)}"
 
-    def test_06_ready(self, deployer: Deployer, tc: TestCase):
+    def test_06_ready(self, deployer: Deployer, tc: TestCase, test_mode: str):
         """LLMInferenceService should become Ready."""
+        _require_deployed(deployer, tc, test_mode)
         _log(f"Waiting for '{tc.name}' Ready=True")
         deployer.wait_for_ready(tc, print_fn=_log)
         _log(f"'{tc.name}' is Ready")
@@ -142,8 +153,9 @@ class TestConformance:
             assert content or tokens > 0, f"Empty response for prompt: {prompt}"
             assert tokens > 0, "No tokens generated"
 
-    def test_10_metrics_vllm(self, scraper: Scraper, tc: TestCase):
+    def test_10_metrics_vllm(self, deployer: Deployer, scraper: Scraper, tc: TestCase, test_mode: str):
         """vLLM metrics should show successful requests."""
+        _require_deployed(deployer, tc, test_mode)
         mc = tc.validation.metrics_check
         if not mc.enabled or not mc.check_vllm:
             pytest.skip("vLLM metrics check disabled")
@@ -157,8 +169,11 @@ class TestConformance:
         failed = [c for c in checks if not c.passed]
         assert not failed, f"vLLM metric checks failed: {[c.message for c in failed]}"
 
-    def test_11_metrics_cache(self, deployer: Deployer, scraper: Scraper, tc: TestCase, mock_mode: bool):
+    def test_11_metrics_cache(
+        self, deployer: Deployer, scraper: Scraper, tc: TestCase, mock_mode: bool, test_mode: str
+    ):
         """Prefix cache metrics should show hits."""
+        _require_deployed(deployer, tc, test_mode)
         mc = tc.validation.metrics_check
         if not mc.enabled or not mc.check_prefix_cache:
             pytest.skip("prefix cache check disabled")
@@ -182,8 +197,9 @@ class TestConformance:
             failed = [c for c in checks if not c.passed]
             assert not failed, f"Cache metric checks failed: {[c.message for c in failed]}"
 
-    def test_12_metrics_pd(self, scraper: Scraper, tc: TestCase, request):
+    def test_12_metrics_pd(self, deployer: Deployer, scraper: Scraper, tc: TestCase, test_mode: str, request):
         """P/D metrics should show token distribution."""
+        _require_deployed(deployer, tc, test_mode)
         mc = tc.validation.metrics_check
         if not mc.enabled or not mc.check_pd:
             pytest.skip("P/D metrics check disabled")
@@ -202,8 +218,9 @@ class TestConformance:
         failed = [c for c in checks if not c.passed]
         assert not failed, f"P/D metric checks failed: {[c.message for c in failed]}"
 
-    def test_13_metrics_scheduler(self, deployer: Deployer, scraper: Scraper, tc: TestCase, request):
+    def test_13_metrics_scheduler(self, deployer: Deployer, scraper: Scraper, tc: TestCase, test_mode: str, request):
         """Scheduler/EPP metrics should show processed requests."""
+        _require_deployed(deployer, tc, test_mode)
         mc = tc.validation.metrics_check
         if not mc.enabled or not mc.check_scheduler:
             pytest.skip("scheduler metrics check disabled")
@@ -222,8 +239,9 @@ class TestConformance:
         failed = [c for c in checks if not c.passed]
         assert not failed, f"Scheduler metric checks failed: {[c.message for c in failed]}"
 
-    def test_14_metrics_flow_control(self, deployer: Deployer, scraper: Scraper, tc: TestCase):
+    def test_14_metrics_flow_control(self, deployer: Deployer, scraper: Scraper, tc: TestCase, test_mode: str):
         """Flow control metrics should show dispatch activity."""
+        _require_deployed(deployer, tc, test_mode)
         mc = tc.validation.metrics_check
         if not mc.enabled or not mc.check_flow_control:
             pytest.skip("flow control metrics check disabled")
@@ -238,8 +256,9 @@ class TestConformance:
         failed = [c for c in checks if not c.passed]
         assert not failed, f"Flow control metric checks failed: {[c.message for c in failed]}"
 
-    def test_20_benchmark(self, deployer: Deployer, tc: TestCase, guidellm_image: str):
+    def test_20_benchmark(self, deployer: Deployer, tc: TestCase, test_mode: str, guidellm_image: str):
         """Run GuideLLM benchmark and check performance thresholds."""
+        _require_deployed(deployer, tc, test_mode)
         bc = tc.validation.benchmark
         if not bc.enabled:
             pytest.skip("benchmark disabled")
@@ -311,8 +330,11 @@ class TestConformance:
             failures.append(f"failed ratio={failed_ratio:.4f} > {t.max_failed_ratio}")
         assert not failures, f"Performance thresholds breached: {'; '.join(failures)}"
 
-    def test_21_metrics_post_benchmark(self, scraper: Scraper, tc: TestCase, request):
+    def test_21_metrics_post_benchmark(
+        self, deployer: Deployer, scraper: Scraper, tc: TestCase, test_mode: str, request
+    ):
         """Scrape and validate P/D metrics after benchmark run."""
+        _require_deployed(deployer, tc, test_mode)
         mc = tc.validation.metrics_check
         bc = tc.validation.benchmark
         if not mc.enabled or not mc.check_pd or not bc.enabled:
@@ -334,12 +356,14 @@ class TestConformance:
         failed = [c for c in checks if not c.passed]
         assert not failed, f"Post-benchmark P/D metric checks failed: {[c.message for c in failed]}"
 
-    def test_99_cleanup(self, deployer: Deployer, tc: TestCase, no_cleanup: bool):
+    def test_99_cleanup(self, deployer: Deployer, tc: TestCase, no_cleanup: bool, test_mode: str):
         """Clean up deployed resources."""
         if no_cleanup:
             pytest.skip("--nocleanup set")
         if not tc.cleanup:
             pytest.skip("cleanup disabled in test case config")
+        if test_mode != "discover" and not deployer.is_deployed(tc.name):
+            pytest.skip(f"nothing to clean up — deploy was not successful for '{tc.name}'")
         _log(f"Cleaning up '{tc.name}'...")
         deployer.cleanup(tc)
         _log("Cleanup complete")

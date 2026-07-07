@@ -1,5 +1,6 @@
 MANIFEST_REPO ?= https://github.com/aneeshkp/llm-d-conformance-manifests.git
-MANIFEST_REF  ?= main
+BRANCH        ?=
+MANIFEST_REF  ?= $(if $(BRANCH),$(BRANCH),main)
 MANIFEST_DIR  ?= deploy/manifests
 NAMESPACE     ?= llm-conformance-test
 TESTCASE_DIR  ?= configs/testcases
@@ -58,7 +59,29 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: setup
-setup: ## Clone manifest repo
+setup: ## Clone manifest repo (MANIFEST_REF=branch, or interactive if not set)
+	@if [ -t 0 ] && [ "$(origin MANIFEST_REF)" = "file" ] && [ -z "$(BRANCH)" ]; then \
+		echo "Fetching branches from $(MANIFEST_REPO)..."; \
+		BRANCHES=$$(git ls-remote --heads $(MANIFEST_REPO) 2>/dev/null | sed 's|.*refs/heads/||' | sort); \
+		echo ""; \
+		echo "Available branches:"; \
+		i=1; for b in $$BRANCHES; do echo "  $$i) $$b"; i=$$((i+1)); done; \
+		echo ""; \
+		printf "Select branch number (or press Enter for main): "; \
+		read choice; \
+		if [ -n "$$choice" ]; then \
+			SELECTED=$$(echo "$$BRANCHES" | sed -n "$${choice}p"); \
+			if [ -z "$$SELECTED" ]; then echo "Invalid selection"; exit 1; fi; \
+		else \
+			SELECTED="main"; \
+		fi; \
+		$(MAKE) _do-setup MANIFEST_REF=$$SELECTED; \
+	else \
+		$(MAKE) _do-setup; \
+	fi
+
+.PHONY: _do-setup
+_do-setup:
 	@rm -rf $(MANIFEST_DIR)/*.yaml
 	@git clone --depth 1 --branch $(MANIFEST_REF) $(MANIFEST_REPO) /tmp/llm-d-manifests
 	@COMMIT=$$(git -C /tmp/llm-d-manifests rev-parse HEAD); \
@@ -67,7 +90,18 @@ setup: ## Clone manifest repo
 		"$(MANIFEST_REF)" "$(MANIFEST_REPO)" "$$COMMIT" "$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
 		> $(MANIFEST_DIR)/.manifest-ref; \
 	rm -rf /tmp/llm-d-manifests; \
-	echo "Manifests ready (branch: $(MANIFEST_REF), commit: $${COMMIT:0:8})"
+	echo "Manifests ready (branch: $(MANIFEST_REF), commit: $${COMMIT:0:8})"; \
+	echo ""; \
+	echo "Test cases:"; \
+	for tc in $(TESTCASE_DIR)/*.yaml; do \
+		name=$$(grep '^name:' $$tc | head -1 | sed 's/name: *//'); \
+		manifest=$$(grep 'manifestPath:' $$tc | head -1 | sed 's/.*manifestPath: *//'); \
+		if [ -f "$(MANIFEST_DIR)/$$manifest" ]; then \
+			printf "  \033[32m✓\033[0m %-28s → %s\n" "$$name" "$$manifest"; \
+		else \
+			printf "  \033[31m✗\033[0m %-28s → %s (missing)\n" "$$name" "$$manifest"; \
+		fi; \
+	done
 
 .PHONY: sync
 sync: ## Install dependencies with uv
