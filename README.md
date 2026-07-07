@@ -26,12 +26,22 @@ cd llm-d-e2e
 # 2. Install dependencies
 uv sync
 
-# 3. Clone test manifests (LLMInferenceService YAMLs)
+# 3. Clone test manifests — interactive (lists branches)
+uv run llm-d-e2e --setup
+
+# 3. Or clone a specific branch directly
 uv run llm-d-e2e --setup main          # latest
-uv run llm-d-e2e --setup 3.4-stable    # specific release
+uv run llm-d-e2e --setup 3.5-GA        # 3.5 GA manifests
+uv run llm-d-e2e --setup 3.4-stable    # 3.4 stable manifests
 
 # 4. (Optional) Set up a shortcut
 alias e2e='uv run llm-d-e2e'
+```
+
+You can also use `make setup` which provides the same interactive branch selection:
+```bash
+make setup                      # interactive — lists branches, pick one
+make setup BRANCH=3.5-GA        # direct — specific branch
 ```
 
 ## Quick Start
@@ -57,11 +67,11 @@ e2e -t single-gpu
 # Multiple test cases
 e2e -t single-gpu,cache-aware
 
+# Setup manifests and run tests in one command
+e2e --setup 3.5-GA -t single-gpu,cache-aware --mock -v
+
 # Keep resources after test (for debugging)
 e2e -t single-gpu --nocleanup
-
-# Use pre-cached model from PVC
-e2e -t single-gpu --model-source pvc
 
 # Simulate vLLM with llm-d-inference-sim (no GPU needed)
 e2e -t single-gpu --mock
@@ -98,6 +108,90 @@ e2e -t single-gpu --mode discover --endpoint http://gateway.example.com/ns/model
 
 This skips the deploy and cleanup phases — only runs health, models, inference, and metrics checks.
 
+## Container Image
+
+The test suite is available as a container image at `quay.io/aneeshkp/llm-d-e2e`.
+
+### Build
+
+```bash
+# Default (main manifests baked in)
+docker build -t llm-d-e2e .
+
+# Specific manifest branch baked in
+docker build --build-arg MANIFEST_REF=3.5-GA -t llm-d-e2e:3.5 .
+```
+
+### Run tests
+
+```bash
+# Run with baked-in manifests
+docker run --rm \
+  -v ~/.kube:/root/.kube:z \
+  quay.io/aneeshkp/llm-d-e2e \
+  -t single-gpu-smoke --mock -v
+
+# Use a non-default kubeconfig
+docker run --rm \
+  -e KUBECONFIG=/root/.kube/my-cluster \
+  -v ~/.kube:/root/.kube:z \
+  quay.io/aneeshkp/llm-d-e2e \
+  -t single-gpu-smoke,single-gpu,cache-aware --mock -v
+
+# Setup different manifests and run tests in one command
+docker run --rm \
+  -e KUBECONFIG=/root/.kube/my-cluster \
+  -v ~/.kube:/root/.kube:z \
+  quay.io/aneeshkp/llm-d-e2e \
+  --setup 3.5-GA \
+  -t cache-aware,flow-control,flow-control-tokens --mock -v
+
+# Generate HTML report (mount reports directory)
+docker run --rm \
+  -e KUBECONFIG=/root/.kube/my-cluster \
+  -v ~/.kube:/root/.kube:z \
+  -v $(pwd)/reports:/app/reports:z \
+  quay.io/aneeshkp/llm-d-e2e \
+  -t single-gpu-smoke --mock --html reports/mock-ci.html -v
+```
+
+### Interactive mode
+
+```bash
+# Interactive shell — switch branches, run multiple tests
+docker run --rm -it \
+  -e KUBECONFIG=/root/.kube/my-cluster \
+  -v ~/.kube:/root/.kube:z \
+  -v $(pwd)/reports:/app/reports:z \
+  --entrypoint bash quay.io/aneeshkp/llm-d-e2e
+
+# Inside the container:
+uv run llm-d-e2e --setup              # interactive branch selection
+uv run llm-d-e2e --setup 3.5-GA       # or direct
+uv run llm-d-e2e -t single-gpu --mock -v
+uv run llm-d-e2e -t cache-aware --mock --html reports/cache.html -v
+```
+
+### Utility commands
+
+```bash
+# List test cases
+docker run --rm quay.io/aneeshkp/llm-d-e2e --list-testcases
+
+# List profiles
+docker run --rm quay.io/aneeshkp/llm-d-e2e --list-profiles
+
+# Setup only (clone manifests, show test case mapping)
+docker run --rm quay.io/aneeshkp/llm-d-e2e --setup 3.5-GA
+```
+
+### How manifests work in the container
+
+- **Build time**: `main` branch manifests are baked into the image (configurable via `--build-arg MANIFEST_REF=`)
+- **Runtime `--setup <branch>`**: clones the specified branch from GitHub, replaces baked-in manifests
+- **Runtime `--setup`** (interactive, requires `-it`): lists all branches from GitHub, prompts to pick
+- Network access to GitHub is required at runtime for `--setup`; without it, the baked-in manifests are used
+
 ## Test Cases
 
 | Name | GPUs | What it tests |
@@ -129,6 +223,8 @@ Each test case runs through ordered phases:
 9. **Inference** — POST /v1/chat/completions
 10. **Metrics** — scrape and validate Prometheus metrics
 11. **Cleanup** — delete resources
+
+If deploy fails (e.g., manifest missing for the selected branch), all subsequent phases for that test case are automatically skipped. CrashLoopBackOff is detected within ~45 seconds instead of waiting the full timeout.
 
 ## P/D Performance Benchmark
 
@@ -202,3 +298,5 @@ uv run ruff check src/ tests/
 # Format
 uv run ruff format src/ tests/
 ```
+
+CI runs lint, format, and smoke tests automatically on every PR via GitHub Actions.

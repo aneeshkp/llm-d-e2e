@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 DEFAULT_MOCK_IMAGE = "ghcr.io/llm-d/llm-d-inference-sim:latest"
+MANIFEST_REPO = "https://github.com/aneeshkp/llm-d-conformance-manifests.git"
 
 
 def main():
@@ -69,7 +70,12 @@ def main():
     parser.add_argument("--list-testcases", action="store_true", help="List available test cases")
     parser.add_argument("--list-profiles", action="store_true", help="List available profiles")
     parser.add_argument(
-        "--setup", default="", metavar="REF", nargs="?", const="main", help="Clone manifest repo (default branch: main)"
+        "--setup",
+        default=None,
+        metavar="REF",
+        nargs="?",
+        const="",
+        help="Clone manifest repo (interactive if no branch given)",
     )
 
     args = parser.parse_args()
@@ -83,9 +89,15 @@ def main():
         _list_profiles()
         return
 
-    if args.setup is not None and args.setup != "":
-        _setup_manifests(args.setup)
-        return
+    if args.setup is not None:
+        if args.setup == "":
+            ref = _interactive_setup() if sys.stdin.isatty() else "main"
+        else:
+            ref = args.setup
+        _setup_manifests(ref)
+        sys.stdout.flush()
+        if not args.testcase and not args.profile:
+            return
 
     # Build pytest args
     pytest_args = ["tests/test_conformance.py"]
@@ -176,10 +188,41 @@ def _list_profiles():
         print(f"  {'':20s} tests: {cases}")
 
 
+def _interactive_setup() -> str:
+    repo = MANIFEST_REPO
+    print(f"Fetching branches from {repo}...")
+    result = subprocess.run(
+        ["git", "ls-remote", "--heads", repo],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print("Failed to fetch branches, defaulting to main")
+        return "main"
+
+    branches = sorted(line.split("refs/heads/")[-1] for line in result.stdout.strip().splitlines())
+    print("\nAvailable branches:")
+    for i, b in enumerate(branches, 1):
+        print(f"  {i}) {b}")
+
+    print()
+    choice = input("Select branch number (or Enter for main): ").strip()
+    if choice:
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(branches):
+                return branches[idx]
+            print("Invalid selection, using main")
+        except ValueError:
+            print("Invalid input, using main")
+    return "main"
+
+
 def _setup_manifests(ref: str):
+    import yaml
     from datetime import datetime, timezone
 
-    repo = "https://github.com/aneeshkp/llm-d-conformance-manifests.git"
+    repo = MANIFEST_REPO
     manifest_dir = Path("deploy/manifests")
     manifest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -212,6 +255,19 @@ def _setup_manifests(ref: str):
     )
 
     print(f"Manifests ready in {manifest_dir}/ (branch: {ref}, commit: {commit[:8]})")
+
+    testcase_dir = Path("configs/testcases")
+    if testcase_dir.exists():
+        print("\nTest cases:")
+        for tc_file in sorted(testcase_dir.glob("*.yaml")):
+            with open(tc_file) as fh:
+                data = yaml.safe_load(fh)
+            name = data.get("name", tc_file.stem)
+            manifest = data.get("deployment", {}).get("manifestPath", "")
+            if manifest and (manifest_dir / manifest).exists():
+                print(f"  \033[32m✓\033[0m {name:<28s} → {manifest}")
+            else:
+                print(f"  \033[31m✗\033[0m {name:<28s} → {manifest} (missing)")
 
 
 if __name__ == "__main__":
