@@ -136,7 +136,7 @@ The `pd-performance` test case runs a [GuideLLM](https://github.com/vllm-project
 
 ### Requirements
 
-- 16 GPUs: 2 decode nodes (4 GPU each, TP=4) + 4 prefill nodes (2 GPU each, TP=2)
+- 16 GPUs: 2 decode pods (4 GPU each, TP=4) + 4 prefill pods (2 GPU each, TP=2)
 - RDMA/InfiniBand networking (`rdma/ib` resource)
 - Pre-created PVC `model-cache-pvc` with the model downloaded (500Gi)
 
