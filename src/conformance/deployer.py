@@ -71,6 +71,7 @@ class Deployer:
         self._port_forward_port: int = 0
         self._pod_pf_proc: subprocess.Popen | None = None
         self._pod_pf_port: int = 0
+        self._pod_pf_name: str = ""
         self._render_image_cached: str | None = None
 
     @property
@@ -300,6 +301,7 @@ class Deployer:
         deadline = time.time() + timeout
         name = tc.name
         start = time.time()
+        crashloop_count = 0
 
         while time.time() < deadline:
             elapsed = int(time.time() - start)
@@ -331,12 +333,44 @@ class Deployer:
                     print_fn(f"[{elapsed}s/{int(timeout)}s] Ready={status or 'Unknown'} reason={reason}")
                 if status == "True":
                     return True
+
+                crash_pods = self._check_crashloop(name)
+                if crash_pods:
+                    crashloop_count += 1
+                    if print_fn:
+                        print_fn(f"CrashLoopBackOff detected: {', '.join(crash_pods)}")
+                    if crashloop_count >= 3:
+                        raise RuntimeError(f"Pods in CrashLoopBackOff for {name}: {', '.join(crash_pods)}")
+                else:
+                    crashloop_count = 0
             except RuntimeError:
+                raise
+            except Exception:
                 if print_fn:
                     print_fn(f"[{elapsed}s/{int(timeout)}s] resource not found yet")
             time.sleep(15)
 
         raise TimeoutError(f"{name} not ready after {timeout}s")
+
+    def _check_crashloop(self, name: str) -> list[str]:
+        """Return pod names in CrashLoopBackOff for this LLMInferenceService."""
+        output = self.kubectl(
+            "get",
+            "pods",
+            "-n",
+            self.namespace,
+            "-l",
+            f"app.kubernetes.io/name={name}",
+            "-o",
+            "jsonpath={range .items[*]}{.metadata.name}={.status.containerStatuses[*].state.waiting.reason} {end}",
+            check=False,
+        )
+        crash_pods = []
+        for entry in output.strip().split() if output.strip() else []:
+            parts = entry.split("=", 1)
+            if len(parts) == 2 and "CrashLoopBackOff" in parts[1]:
+                crash_pods.append(parts[0])
+        return crash_pods
 
     def wait_for_service(self, name: str, timeout: float = 300) -> str:
         deadline = time.time() + timeout
@@ -392,6 +426,7 @@ class Deployer:
         label = f"app.kubernetes.io/name={name}"
         deadline = time.time() + timeout
         start = time.time()
+        crashloop_count = 0
         while time.time() < deadline:
             elapsed = int(time.time() - start)
             try:
@@ -422,7 +457,19 @@ class Deployer:
                             all_running = False
                 if pods and all_running:
                     return pods
+
+                crash_pods = self._check_crashloop(name)
+                if crash_pods:
+                    crashloop_count += 1
+                    if print_fn:
+                        print_fn(f"CrashLoopBackOff detected: {', '.join(crash_pods)}")
+                    if crashloop_count >= 3:
+                        raise RuntimeError(f"Pods in CrashLoopBackOff for {name}: {', '.join(crash_pods)}")
+                else:
+                    crashloop_count = 0
             except RuntimeError:
+                raise
+            except Exception:
                 if print_fn:
                     print_fn(f"[{elapsed}s/{int(timeout)}s] waiting for pods...")
             time.sleep(15)
@@ -504,7 +551,9 @@ class Deployer:
     def get_pod_endpoint(self, name: str) -> str:
         """Port-forward directly to a workload pod, bypassing the gateway/EPP."""
         if self._pod_pf_proc and self._pod_pf_proc.poll() is None:
-            return f"https://localhost:{self._pod_pf_port}"
+            if self._pod_pf_name == name:
+                return f"https://localhost:{self._pod_pf_port}"
+            self._stop_pod_port_forward()
 
         label = WORKLOAD_LABEL.format(name=name)
         output = self.kubectl(
@@ -530,6 +579,7 @@ class Deployer:
         log.info("Starting pod port-forward: localhost:%d → %s:8000", local_port, pod_name)
         self._pod_pf_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self._pod_pf_port = local_port
+        self._pod_pf_name = name
 
         time.sleep(3)
         if self._pod_pf_proc.poll() is not None:
@@ -538,13 +588,20 @@ class Deployer:
 
         return f"https://localhost:{local_port}"
 
+    def _stop_pod_port_forward(self):
+        if self._pod_pf_proc:
+            self._pod_pf_proc.terminate()
+            self._pod_pf_proc.wait(timeout=5)
+            self._pod_pf_proc = None
+            self._pod_pf_port = 0
+            self._pod_pf_name = ""
+
     def stop_port_forward(self):
-        for proc_attr in ("_port_forward_proc", "_pod_pf_proc"):
-            proc = getattr(self, proc_attr)
-            if proc:
-                proc.terminate()
-                proc.wait(timeout=5)
-                setattr(self, proc_attr, None)
+        if self._port_forward_proc:
+            self._port_forward_proc.terminate()
+            self._port_forward_proc.wait(timeout=5)
+            self._port_forward_proc = None
+        self._stop_pod_port_forward()
         log.info("Port-forwards stopped")
 
     def cleanup(self, tc: TestCase, timeout: float = 120):
