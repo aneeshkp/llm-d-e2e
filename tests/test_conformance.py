@@ -17,12 +17,9 @@ Each test case runs through ordered phases:
 from __future__ import annotations
 
 import time
-
 from pathlib import Path
 
 import pytest
-
-_MANIFEST_DIR = Path("deploy/manifests")
 
 from conformance.benchmark import run_benchmark
 from conformance.config import TestCase
@@ -39,6 +36,7 @@ from conformance.metrics import (
 )
 
 LLMISVC_CRD = "llminferenceservices.serving.kserve.io"
+_MANIFEST_DIR = Path("deploy/manifests")
 
 
 def _log(msg: str, capsys=None):
