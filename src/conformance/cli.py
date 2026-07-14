@@ -242,6 +242,8 @@ def _setup_manifests(ref: str):
         text=True,
     ).stdout.strip()
 
+    for stale in manifest_dir.glob("*.yaml"):
+        stale.unlink()
     for f in Path("/tmp/llm-d-manifests").glob("*.yaml"):
         (manifest_dir / f.name).write_text(f.read_text())
     subprocess.run(["rm", "-rf", "/tmp/llm-d-manifests"])
