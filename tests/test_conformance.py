@@ -36,11 +36,16 @@ from conformance.metrics import (
 )
 
 LLMISVC_CRD = "llminferenceservices.serving.kserve.io"
-_MANIFEST_DIR = Path("deploy/manifests")
+_MANIFEST_DIR = Path(__file__).resolve().parent.parent / "deploy" / "manifests"
 
 
 def _log(msg: str, capsys=None):
     print(f"  → {msg}")
+
+
+def _require_manifest(tc: TestCase) -> None:
+    if not (_MANIFEST_DIR / tc.deployment.manifest_path).exists():
+        pytest.skip(f"manifest not found for this branch: {tc.deployment.manifest_path}")
 
 
 def _require_deployed(deployer: Deployer, tc: TestCase, test_mode: str) -> None:
@@ -68,8 +73,7 @@ class TestConformance:
 
     def test_01_prereq(self, deployer: Deployer, tc: TestCase):
         """LLMInferenceService CRD must be installed and manifest must exist."""
-        if not (_MANIFEST_DIR / tc.deployment.manifest_path).exists():
-            pytest.skip(f"manifest not found for this branch: {tc.deployment.manifest_path}")
+        _require_manifest(tc)
         found = deployer.check_crd_exists(LLMISVC_CRD)
         _log(f"CRD {LLMISVC_CRD}: {'found' if found else 'NOT FOUND'}")
         assert found, f"CRD {LLMISVC_CRD} not found"
@@ -78,8 +82,7 @@ class TestConformance:
         """Deploy the LLMInferenceService manifest."""
         if test_mode == "discover":
             pytest.skip("discover mode — skipping deploy")
-        if not (_MANIFEST_DIR / tc.deployment.manifest_path).exists():
-            pytest.skip(f"manifest not found for this branch: {tc.deployment.manifest_path}")
+        _require_manifest(tc)
         _log(f"Deploying {tc.deployment.manifest_path} as '{tc.name}'")
         result = deployer.deploy(tc)
         _log(f"Deploy {'succeeded' if result.success else 'FAILED'} in {result.duration:.1f}s")
