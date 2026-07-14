@@ -2,6 +2,15 @@
 
 Step-by-step guide to add a new conformance test case to llm-d-e2e.
 
+## Choose Your Path
+
+| Path | Best for | Jump to |
+|---|---|---|
+| **Quick start (script)** | New test case with standard config — generates all boilerplate for you | [Quick Start: Generate Boilerplate](#quick-start-generate-boilerplate) |
+| **Manual setup** | Custom topology, non-standard config, or learning how the pieces fit | [Step 1: Create the Manifest](#step-1-create-the-manifest) |
+| **New conformance phase** | Adding a new test phase or metrics validator (not just a new test case) | [Adding a New Conformance Phase](#adding-a-new-conformance-phase) |
+| **New metrics check** | Adding a new Prometheus metrics validation (e.g. NIXL) | [To add a new metrics check](#to-add-a-new-metrics-check-full-example-adding-nixl-kv-transfer-validation) |
+
 ## Overview
 
 A test case has two parts:
