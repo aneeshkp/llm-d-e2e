@@ -4,6 +4,8 @@ End-to-end conformance tests for [llm-d](https://github.com/llm-d) / KServe `LLM
 
 Python + pytest rewrite of the [Go/Ginkgo conformance framework](https://github.com/aneeshkp/llm-d-conformance-test). See that project's [architecture docs](https://github.com/aneeshkp/llm-d-conformance-test/blob/main/docs/architecture.md) for detailed diagrams, test topologies, and metrics coverage.
 
+**Guides:** [Adding a Test Case](docs/adding-a-test-case.md)
+
 ## Prerequisites
 
 - Python 3.11+
