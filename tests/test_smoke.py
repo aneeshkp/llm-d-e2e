@@ -70,3 +70,49 @@ def test_deployer_is_deployed():
     assert d.is_deployed("foo")
     d._deployed.discard("foo")
     assert not d.is_deployed("foo")
+
+
+def test_setup_manifests_removes_stale_files(tmp_path, monkeypatch):
+    """Switching manifest branches must remove stale files from the previous branch.
+
+    Regression: _setup_manifests used to copy new files on top of existing ones
+    without pruning. Switching main→3.4-stable left flow-control-tokens.yaml
+    behind, causing it to appear available when the 3.4 EPP would crash on it.
+    """
+    import shutil
+    from unittest.mock import MagicMock, patch
+    import conformance.cli as cli_mod
+
+    monkeypatch.chdir(tmp_path)
+
+    # Simulate manifests left over from a previous `--setup main` run
+    manifest_dir = tmp_path / "deploy" / "manifests"
+    manifest_dir.mkdir(parents=True)
+    for stale in ["flow-control-tokens.yaml", "flow-control.yaml", "pd-performance.yaml"]:
+        (manifest_dir / stale).write_text("stale: true")
+
+    # Pre-create what `git clone` would produce for 3.4-stable
+    clone_dir = Path("/tmp/llm-d-manifests")
+    clone_dir.mkdir(exist_ok=True)
+    for new in ["single-gpu.yaml", "cache-aware.yaml"]:
+        (clone_dir / new).write_text("branch: 3.4-stable")
+
+    def fake_run(cmd, **kwargs):
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "abc1234deadbeef\n"
+        result.stderr = ""
+        if cmd[0] == "rm":
+            shutil.rmtree(str(clone_dir), ignore_errors=True)
+        return result
+
+    with patch.object(cli_mod, "subprocess") as mock_sub:
+        mock_sub.run.side_effect = fake_run
+        cli_mod._setup_manifests("3.4-stable")
+
+    remaining = {f.name for f in manifest_dir.glob("*.yaml")}
+    assert "flow-control-tokens.yaml" not in remaining
+    assert "flow-control.yaml" not in remaining
+    assert "pd-performance.yaml" not in remaining
+    assert "single-gpu.yaml" in remaining
+    assert "cache-aware.yaml" in remaining

@@ -155,6 +155,17 @@ docker run --rm \
   -t single-gpu-smoke --mock --html reports/mock-ci.html -v
 ```
 
+### Switch manifest branch
+
+```bash
+# List available branches and pick one (requires -it for interactive prompt)
+docker run --rm -it quay.io/aneeshkp/llm-d-e2e --setup
+
+# Direct — no prompt
+docker run --rm quay.io/aneeshkp/llm-d-e2e --setup 3.5-GA
+docker run --rm quay.io/aneeshkp/llm-d-e2e --setup 3.4-stable
+```
+
 ### Interactive mode
 
 ```bash
