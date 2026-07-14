@@ -173,3 +173,54 @@ def test_require_manifest_does_not_skip_when_present(tmp_path):
         tc_mod._require_manifest(FakeTestCase())
     finally:
         tc_mod._MANIFEST_DIR = original
+
+
+def test_new_testcase_script_generates_loadable_config(tmp_path, monkeypatch):
+    """new-testcase.sh must produce a config YAML that load_testcase() can parse."""
+    import subprocess
+
+    import yaml
+
+    script = Path(__file__).parent.parent / "scripts" / "new-testcase.sh"
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "configs" / "testcases").mkdir(parents=True)
+    (tmp_path / "deploy" / "manifests").mkdir(parents=True)
+
+    result = subprocess.run([str(script), "my-gen-test"], capture_output=True, text=True)
+    assert result.returncode == 0, f"Script failed: {result.stderr}"
+
+    config_path = tmp_path / "configs" / "testcases" / "my-gen-test.yaml"
+    assert config_path.exists()
+
+    tc = load_testcase(str(config_path))
+    assert tc.name == "my-gen-test"
+    assert tc.deployment.manifest_path == "my-gen-test.yaml"
+    assert tc.deployment.replicas == 1
+    assert tc.deployment.resources.gpus == 1
+    assert tc.validation.health_port == 8000
+    assert tc.validation.test_prompts == ["What is 2+2?"]
+    assert tc.validation.metrics_check.check_vllm is True
+    assert tc.validation.metrics_check.check_scheduler is True
+    assert tc.model.name == "Qwen/Qwen3-0.6B"
+
+    manifest_path = tmp_path / "deploy" / "manifests" / "my-gen-test.yaml"
+    assert manifest_path.exists()
+    manifest = yaml.safe_load(manifest_path.read_text())
+    assert manifest["kind"] == "LLMInferenceService"
+    assert manifest["metadata"]["name"] == "my-gen-test"
+    assert manifest["spec"]["replicas"] == 1
+
+
+def test_new_testcase_script_rejects_duplicate(tmp_path, monkeypatch):
+    """new-testcase.sh must refuse to overwrite an existing config."""
+    import subprocess
+
+    script = Path(__file__).parent.parent / "scripts" / "new-testcase.sh"
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "configs" / "testcases").mkdir(parents=True)
+    (tmp_path / "deploy" / "manifests").mkdir(parents=True)
+
+    subprocess.run([str(script), "dupe-test"], capture_output=True, text=True)
+    result = subprocess.run([str(script), "dupe-test"], capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "already exists" in result.stdout or "already exists" in result.stderr
