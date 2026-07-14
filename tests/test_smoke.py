@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from conformance.config import load_testcase, load_profile, load_testcases_from_dir, parse_duration
@@ -116,3 +118,58 @@ def test_setup_manifests_removes_stale_files(tmp_path, monkeypatch):
     assert "pd-performance.yaml" not in remaining
     assert "single-gpu.yaml" in remaining
     assert "cache-aware.yaml" in remaining
+
+
+def test_require_manifest_skips_when_missing(tmp_path):
+    """test_01_prereq and test_02_deploy skip when the manifest file is absent."""
+    from dataclasses import dataclass
+
+    @dataclass
+    class FakeDeployConfig:
+        manifest_path: str = "nonexistent.yaml"
+
+    @dataclass
+    class FakeTestCase:
+        deployment: FakeDeployConfig = None
+
+        def __post_init__(self):
+            self.deployment = FakeDeployConfig()
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    import test_conformance as tc_mod
+
+    original = tc_mod._MANIFEST_DIR
+    try:
+        tc_mod._MANIFEST_DIR = tmp_path
+        with pytest.raises(pytest.skip.Exception, match="nonexistent.yaml"):
+            tc_mod._require_manifest(FakeTestCase())
+    finally:
+        tc_mod._MANIFEST_DIR = original
+
+
+def test_require_manifest_does_not_skip_when_present(tmp_path):
+    """_require_manifest should not skip when the manifest exists."""
+    from dataclasses import dataclass
+
+    @dataclass
+    class FakeDeployConfig:
+        manifest_path: str = "exists.yaml"
+
+    @dataclass
+    class FakeTestCase:
+        deployment: FakeDeployConfig = None
+
+        def __post_init__(self):
+            self.deployment = FakeDeployConfig()
+
+    (tmp_path / "exists.yaml").write_text("kind: LLMInferenceService")
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    import test_conformance as tc_mod
+
+    original = tc_mod._MANIFEST_DIR
+    try:
+        tc_mod._MANIFEST_DIR = tmp_path
+        tc_mod._require_manifest(FakeTestCase())
+    finally:
+        tc_mod._MANIFEST_DIR = original
