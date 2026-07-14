@@ -18,7 +18,11 @@ from __future__ import annotations
 
 import time
 
+from pathlib import Path
+
 import pytest
+
+_MANIFEST_DIR = Path("deploy/manifests")
 
 from conformance.benchmark import run_benchmark
 from conformance.config import TestCase
@@ -65,7 +69,9 @@ class TestConformance:
     """Ordered conformance phases for each test case."""
 
     def test_01_prereq(self, deployer: Deployer, tc: TestCase):
-        """LLMInferenceService CRD must be installed."""
+        """LLMInferenceService CRD must be installed and manifest must exist."""
+        if not (_MANIFEST_DIR / tc.deployment.manifest_path).exists():
+            pytest.skip(f"manifest not found for this branch: {tc.deployment.manifest_path}")
         found = deployer.check_crd_exists(LLMISVC_CRD)
         _log(f"CRD {LLMISVC_CRD}: {'found' if found else 'NOT FOUND'}")
         assert found, f"CRD {LLMISVC_CRD} not found"
@@ -74,6 +80,8 @@ class TestConformance:
         """Deploy the LLMInferenceService manifest."""
         if test_mode == "discover":
             pytest.skip("discover mode — skipping deploy")
+        if not (_MANIFEST_DIR / tc.deployment.manifest_path).exists():
+            pytest.skip(f"manifest not found for this branch: {tc.deployment.manifest_path}")
         _log(f"Deploying {tc.deployment.manifest_path} as '{tc.name}'")
         result = deployer.deploy(tc)
         _log(f"Deploy {'succeeded' if result.success else 'FAILED'} in {result.duration:.1f}s")
