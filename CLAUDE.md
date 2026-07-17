@@ -73,6 +73,7 @@ Makefile targets mirror CLI: `make test TESTCASE=single-gpu`, `make unittest`, `
 - **metrics.py** — `Scraper`: scrapes Prometheus metrics from pods via `kubectl exec` (python3/wget), falling back to port-forward + httpx for containers without those tools (simulator, distroless). Supports bearer token auth for EPP metrics (`--metrics-endpoint-auth=true`). `parse_prometheus()` parses text exposition format. Per-topology validators: `validate_vllm_basic`, `validate_cache_aware`, `validate_pd`, `validate_scheduler`.
 - **model.py** — `ModelDownloader`: creates PVCs and download Jobs for pre-caching models from HuggingFace.
 - **report.py** — JSON report generation with pass/fail/skip summary.
+- **benchmark.py** — `run_benchmark()`: creates a GuideLLM K8s Job, waits for completion, parses JSON results (output tokens/s, TTFT/ITL median+p95, request counts). Results delimited by `---GUIDELLM_JSON_START---` marker in pod logs.
 
 ### Model caching (`--model-source pvc` / `--mode cache`)
 
@@ -93,6 +94,8 @@ The `--mock` flag replaces the vLLM container with [llm-d-inference-sim](https:/
 The `--render-image` flag injects a vLLM CPU sidecar for tokenizer rendering alongside the simulator (requires vLLM ≥ 0.19 `vllm launch render`). If not specified, defaults to `vllm/vllm-openai-cpu:v0.19.1`.
 
 ## Adding a New Test Case
+
+Use `scripts/new-testcase.sh <name>` to generate a YAML config + manifest stub, then customize:
 
 1. Create `configs/testcases/<name>.yaml` using camelCase keys matching the `TestCase` dataclass hierarchy in `config.py`.
 2. Add the corresponding LLMInferenceService manifest to the manifest repo (or `deploy/manifests/` for local testing). Set `deployment.manifestPath` in the YAML to the filename.
@@ -127,8 +130,9 @@ Each metrics validator in `metrics.py` targets a specific deployment topology:
 | `validate_cache_aware` | workload + EPP     | test_11    | Prefix KV cache    |
 | `validate_pd`          | workload + prefill | test_12    | P/D disaggregation |
 | `validate_scheduler`   | EPP pods           | test_13    | Scheduler/EPP      |
+| `validate_flow_control`| EPP pods           | test_14    | Flow control       |
 
-`MetricsCheck.check_nixl` exists in the dataclass for NIXL KV transfer metrics (`nixl:kv_transfer_count_total`) but has no validator method yet — add one in `metrics.py` and wire it up in `test_conformance.py` as `test_14_metrics_nixl`.
+`MetricsCheck.check_nixl` exists in the dataclass for NIXL KV transfer metrics (`nixl:kv_transfer_count_total`) but has no validator method yet — add one in `metrics.py` and wire it up in `test_conformance.py`.
 
 EPP pod discovery tries multiple label patterns (`EPP_LABELS` list in `metrics.py`) because the component label varies across llm-d versions.
 
@@ -155,6 +159,14 @@ EPP pod discovery uses multiple label patterns (`EPP_LABELS` in `metrics.py`) be
 - Health/models go directly to pods; inference goes through the gateway — the EPP only routes inference requests.
 - Metrics scraping tries `kubectl exec` first (python3, wget), falls back to port-forward + httpx for minimal container images.
 - Global pytest timeout is 21600s (6 hours) to accommodate slow model downloads and pod startup.
+
+## CI
+
+GitHub Actions (`.github/workflows/ci.yaml`) runs on push/PR to `main`:
+1. **lint-and-format** — `ruff check` + `ruff format --check` on `src/` and `tests/`
+2. **smoke-tests** — clones manifests (`--setup main`), runs `pytest tests/test_smoke.py` (no cluster required)
+
+No cluster integration tests run in CI.
 
 ## Code Style
 
