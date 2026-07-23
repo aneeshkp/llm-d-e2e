@@ -56,9 +56,22 @@ Makefile targets mirror CLI: `make test TESTCASE=single-gpu`, `make unittest`, `
 
 `conftest.py:pytest_generate_tests()` resolves which test cases to run (from `--testcase` names or `--profile` YAML) and parametrizes the `tc` fixture. Each `tc` is a `TestCase` dataclass loaded from `configs/testcases/*.yaml`. `TestConformance` methods run once per test case.
 
+### Run modes
+
+The `--mode` flag controls which phases execute:
+- **`deploy`** (default) — full lifecycle: deploy → validate → cleanup.
+- **`discover`** — skip deploy/cleanup, validate an existing deployment (requires `--endpoint` or auto-detected). Phases call `_require_deployed()` which returns early in discover mode.
+- **`cache`** — run only the model download phase (create PVC + download Job), then exit. Used to pre-warm a PVC before a real test run.
+
 ### Ordered conformance phases
 
-`test_conformance.py:TestConformance` uses numeric method name prefixes (`test_01_` through `test_99_`) for phase ordering: prereq → deploy → service → gateway → pods → ready → health → models → inference → metrics (4 variants) → cleanup. Phases skip themselves based on `tc` config flags or `--mode discover`.
+`test_conformance.py:TestConformance` uses numeric method name prefixes (`test_01_` through `test_99_`) for phase ordering: prereq → deploy → service → gateway → pods → ready → health → models → inference → metrics (4 variants) → benchmark → post-benchmark metrics → cleanup. Phases skip themselves based on `tc` config flags or `--mode discover`.
+
+**Skip propagation**: Two helpers control cascading skips across phases:
+- `_require_manifest(tc)` — skips the phase if the manifest file doesn't exist for the current branch (prevents deploy attempts with missing manifests).
+- `_require_deployed(deployer, tc, test_mode)` — skips the phase if deploy failed or was skipped (prevents post-deploy phases from running against nothing). In discover mode, this check is bypassed.
+
+**CrashLoopBackOff early detection**: `wait_for_pods()` and `wait_for_ready()` poll for CrashLoopBackOff every 15s. After 3 consecutive detections (~45s), the deploy is failed immediately instead of waiting the full timeout (which can be 30+ minutes).
 
 ### Fixture scoping
 
@@ -86,6 +99,7 @@ Makefile targets mirror CLI: `make test TESTCASE=single-gpu`, `make unittest`, `
 - **configs/testcases/*.yaml** — Each file maps to one `TestCase` dataclass. Contains model info, deployment spec (manifest path, replicas, resources, timeouts), validation criteria (prompts, retry config), and metrics check flags.
 - **configs/profiles/*.yaml** — Named groups of test case names (e.g., `smoke`, `all`, `pd`).
 - **deploy/manifests/*.yaml** — LLMInferenceService manifests, cloned from [llm-d-conformance-manifests](https://github.com/aneeshkp/llm-d-conformance-manifests) via `--setup`. Gitignored.
+- **deploy/manifests/.manifest-ref** — YAML file tracking the active manifest branch, repo URL, commit SHA, and clone timestamp. Written by `--setup` / `make setup`, read by `report.py` to include manifest provenance in test reports.
 
 ### vLLM Simulator (`--mock`)
 
@@ -131,6 +145,7 @@ Each metrics validator in `metrics.py` targets a specific deployment topology:
 | `validate_pd`          | workload + prefill | test_12    | P/D disaggregation |
 | `validate_scheduler`   | EPP pods           | test_13    | Scheduler/EPP      |
 | `validate_flow_control`| EPP pods           | test_14    | Flow control       |
+| `validate_pd` (post)   | workload + prefill | test_21    | P/D after benchmark|
 
 `MetricsCheck.check_nixl` exists in the dataclass for NIXL KV transfer metrics (`nixl:kv_transfer_count_total`) but has no validator method yet — add one in `metrics.py` and wire it up in `test_conformance.py`.
 
@@ -159,6 +174,10 @@ EPP pod discovery uses multiple label patterns (`EPP_LABELS` in `metrics.py`) be
 - Health/models go directly to pods; inference goes through the gateway — the EPP only routes inference requests.
 - Metrics scraping tries `kubectl exec` first (python3, wget), falls back to port-forward + httpx for minimal container images.
 - Global pytest timeout is 21600s (6 hours) to accommodate slow model downloads and pod startup.
+
+## Container Image
+
+Available at `quay.io/aneeshkp/llm-d-e2e`. The `Dockerfile` bakes in manifests at build time (`--build-arg MANIFEST_REF=<branch>`), defaults to `main`. At runtime, `--setup <branch>` replaces the baked-in manifests. Entrypoint is `uv run llm-d-e2e`.
 
 ## CI
 
