@@ -74,6 +74,154 @@ def test_deployer_is_deployed():
     assert not d.is_deployed("foo")
 
 
+def test_apply_with_webhook_retry_succeeds_after_transient_error(monkeypatch):
+    """Regression: deploy() used to fail immediately if the LLMInferenceService
+    admission webhook wasn't serving yet (e.g. right after install/upgrade)."""
+    from conformance.deployer import Deployer
+
+    d = Deployer()
+    calls = []
+
+    def fake_kubectl(*args, **kwargs):
+        calls.append(args)
+        if len(calls) < 3:
+            raise RuntimeError(
+                "kubectl apply failed: Internal error occurred: failed calling webhook "
+                '"llminferenceservice.kserve-webhook-server.v1alpha2.defaulter": '
+                'failed to call webhook: Post "https://...": no endpoints available for service "llmisvc-webhook-server-service"'
+            )
+        return ""
+
+    monkeypatch.setattr(d, "kubectl", fake_kubectl)
+    monkeypatch.setattr("conformance.deployer.time.sleep", lambda _: None)
+
+    d._apply_with_webhook_retry("dummy.yaml", timeout=60, interval=1)
+    assert len(calls) == 3
+
+
+def test_apply_with_webhook_retry_raises_immediately_on_other_errors(monkeypatch):
+    """Non-webhook errors (e.g. a real manifest problem) must not be retried."""
+    from conformance.deployer import Deployer
+
+    d = Deployer()
+    calls = []
+
+    def fake_kubectl(*args, **kwargs):
+        calls.append(args)
+        raise RuntimeError("kubectl apply failed: error validating data: unknown field")
+
+    monkeypatch.setattr(d, "kubectl", fake_kubectl)
+    monkeypatch.setattr("conformance.deployer.time.sleep", lambda _: None)
+
+    with pytest.raises(RuntimeError, match="unknown field"):
+        d._apply_with_webhook_retry("dummy.yaml", timeout=60, interval=1)
+    assert len(calls) == 1
+
+
+def test_apply_with_webhook_retry_times_out(monkeypatch):
+    """If the webhook never comes up within the grace period, fail with a clear error."""
+    from conformance.deployer import Deployer
+
+    d = Deployer()
+
+    def fake_kubectl(*args, **kwargs):
+        raise RuntimeError(
+            'kubectl apply failed: failed calling webhook "llminferenceservice...": no endpoints available for service'
+        )
+
+    monkeypatch.setattr(d, "kubectl", fake_kubectl)
+    monkeypatch.setattr("conformance.deployer.time.sleep", lambda _: None)
+
+    with pytest.raises(RuntimeError, match="waiting for webhook"):
+        d._apply_with_webhook_retry("dummy.yaml", timeout=0.05, interval=0.01)
+
+
+def test_apply_with_webhook_retry_does_not_retry_unrelated_connectivity_errors(monkeypatch):
+    """Connectivity substrings alone (no 'webhook' mention) must not trigger retries.
+
+    Regression: an early version matched bare substrings like 'connection refused' or
+    'eof' anywhere in the error, which could misfire on unrelated failures (e.g. a
+    manifest field containing 'geofence') or mask a real, non-webhook outage behind a
+    misleading 'waiting for webhook' message.
+    """
+    from conformance.deployer import Deployer
+
+    d = Deployer()
+    calls = []
+
+    def fake_kubectl(*args, **kwargs):
+        calls.append(args)
+        raise RuntimeError("kubectl apply failed: error validating data: invalid geofence field")
+
+    monkeypatch.setattr(d, "kubectl", fake_kubectl)
+    monkeypatch.setattr("conformance.deployer.time.sleep", lambda _: None)
+
+    with pytest.raises(RuntimeError, match="geofence"):
+        d._apply_with_webhook_retry("dummy.yaml", timeout=60, interval=1)
+    assert len(calls) == 1
+
+
+def test_apply_with_webhook_retry_always_attempts_once(monkeypatch):
+    """Even with timeout=0, at least one apply attempt must happen."""
+    from conformance.deployer import Deployer
+
+    d = Deployer()
+    calls = []
+
+    def fake_kubectl(*args, **kwargs):
+        calls.append(args)
+        return ""
+
+    monkeypatch.setattr(d, "kubectl", fake_kubectl)
+
+    d._apply_with_webhook_retry("dummy.yaml", timeout=0, interval=1)
+    assert len(calls) == 1
+
+
+def test_apply_with_webhook_retry_recovers_from_crd_not_registered(monkeypatch):
+    """CRD/API-version-not-registered errors (a distinct upgrade race from webhook
+    readiness) must also be retried. Seen in CI as:
+    'the server could not find the requested resource' right after a CRD is
+    installed/updated but the client's API discovery hasn't caught up yet.
+    """
+    from conformance.deployer import Deployer
+
+    d = Deployer()
+    calls = []
+
+    def fake_kubectl(*args, **kwargs):
+        calls.append(args)
+        if len(calls) < 2:
+            raise RuntimeError("Error from server (NotFound): the server could not find the requested resource")
+        return ""
+
+    monkeypatch.setattr(d, "kubectl", fake_kubectl)
+    monkeypatch.setattr("conformance.deployer.time.sleep", lambda _: None)
+
+    d._apply_with_webhook_retry("dummy.yaml", timeout=60, interval=1)
+    assert len(calls) == 2
+
+
+def test_apply_with_webhook_retry_no_matches_for_kind_is_transient(monkeypatch):
+    """'no matches for kind' (stale discovery cache after a CRD apply) is also transient."""
+    from conformance.deployer import Deployer
+
+    d = Deployer()
+    calls = []
+
+    def fake_kubectl(*args, **kwargs):
+        calls.append(args)
+        if len(calls) < 2:
+            raise RuntimeError('no matches for kind "LLMInferenceService" in version "serving.kserve.io/v1alpha1"')
+        return ""
+
+    monkeypatch.setattr(d, "kubectl", fake_kubectl)
+    monkeypatch.setattr("conformance.deployer.time.sleep", lambda _: None)
+
+    d._apply_with_webhook_retry("dummy.yaml", timeout=60, interval=1)
+    assert len(calls) == 2
+
+
 def test_setup_manifests_removes_stale_files(tmp_path, monkeypatch):
     """Switching manifest branches must remove stale files from the previous branch.
 

@@ -268,6 +268,65 @@ class Deployer:
             time.sleep(5)
         log.warning("Timed out waiting for pods to terminate for '%s'", name)
 
+    # Connectivity substrings seen in kubectl apply errors when the LLMInferenceService
+    # admission webhook is registered but its backing pod isn't serving yet (e.g. right
+    # after a fresh install or upgrade). Only checked when the error also mentions
+    # "webhook", so unrelated transient errors (API server overload, a manifest field
+    # that happens to contain "eof", etc.) aren't mistakenly retried under this path.
+    _WEBHOOK_CONNECTIVITY_MARKERS = (
+        "no endpoints available",
+        "connection refused",
+        "context deadline exceeded",
+        "eof",
+    )
+
+    # Substrings seen when kubectl apply targets a CRD/API version that isn't
+    # registered on the server yet (e.g. an upgrade race between installing new
+    # CRDs and applying resources that use them, or a stale client-side API
+    # discovery cache). Distinct from webhook readiness: these phrases are
+    # specific enough on their own and don't require a "webhook" anchor.
+    _CRD_NOT_REGISTERED_MARKERS = (
+        "the server could not find the requested resource",
+        "no matches for kind",
+    )
+
+    @classmethod
+    def _is_webhook_not_ready_error(cls, error: str) -> bool:
+        lowered = error.lower()
+        return "webhook" in lowered and any(m in lowered for m in cls._WEBHOOK_CONNECTIVITY_MARKERS)
+
+    @classmethod
+    def _is_crd_not_registered_error(cls, error: str) -> bool:
+        lowered = error.lower()
+        return any(m in lowered for m in cls._CRD_NOT_REGISTERED_MARKERS)
+
+    @classmethod
+    def _is_transient_apply_error(cls, error: str) -> bool:
+        return cls._is_webhook_not_ready_error(error) or cls._is_crd_not_registered_error(error)
+
+    def _apply_with_webhook_retry(self, tmp_path: str, timeout: float = 120, interval: float = 10) -> None:
+        """Apply a manifest, retrying on known transient post-upgrade races:
+        the admission webhook not serving yet, or the target CRD/API version
+        not registered on the server yet.
+
+        Always attempts at least once, regardless of `timeout`.
+        """
+        deadline = time.time() + timeout
+        while True:
+            try:
+                self.kubectl("apply", "-n", self.namespace, "-f", tmp_path)
+                return
+            except RuntimeError as e:
+                last_error = str(e)
+                if not self._is_transient_apply_error(last_error):
+                    raise
+                if time.time() >= deadline:
+                    raise RuntimeError(
+                        f"kubectl apply failed after {timeout}s waiting for webhook/CRD readiness: {last_error}"
+                    ) from e
+                log.warning("Webhook/CRD not ready yet, retrying apply: %s", last_error)
+                time.sleep(interval)
+
     def deploy(self, tc: TestCase) -> DeployResult:
         start = time.time()
         result = DeployResult(name=tc.name, namespace=self.namespace)
@@ -288,7 +347,7 @@ class Deployer:
             for secret_name in self._collect_pull_secrets(manifest):
                 self.ensure_pull_secret(secret_name)
             self.ensure_gateway_allows_namespace()
-            self.kubectl("apply", "-n", self.namespace, "-f", tmp_path)
+            self._apply_with_webhook_retry(tmp_path)
             self.ensure_metrics_rbac(tc.name)
             result.success = True
             self._deployed.add(tc.name)
