@@ -34,6 +34,12 @@ from conformance.benchmark import run_benchmark
 from conformance.config import TestCase, chat_prompt_to_messages
 from conformance.client import LLMClient
 from conformance.deployer import Deployer
+from conformance.preflight import (
+    check_api_version,
+    check_image_existence,
+    check_manifest_compatibility,
+    resolve_available_plugins,
+)
 from conformance.metrics import (
     Scraper,
     dump_raw_metrics,
@@ -80,6 +86,43 @@ def _check_threshold(name: str, value: float, min_value: float | None = None, ma
 
 class TestConformance:
     """Ordered conformance phases for each test case."""
+
+    def test_00_preflight(self, deployer: Deployer, tc: TestCase):
+        """Pre-flight: verify manifest is compatible with the cluster.
+
+        Three checks: API version, image existence, plugin compatibility.
+        Each skips safely if detection is unavailable.
+        """
+        _require_manifest(tc)
+        manifest_path = _MANIFEST_DIR / tc.deployment.manifest_path
+
+        checks = [
+            ("api_version", lambda: check_api_version(manifest_path, deployer.kubectl)),
+            ("image_existence", lambda: check_image_existence(deployer.kubectl)),
+        ]
+
+        for name, check_fn in checks:
+            result = check_fn()
+            if result.skipped_reason:
+                _log(f"Pre-flight {name}: skipped ({result.skipped_reason})")
+            elif not result.compatible:
+                _log(f"Pre-flight {name} FAIL: {result.diagnosis}")
+                pytest.fail(f"pre-flight [{name}]: {result.diagnosis}")
+            else:
+                _log(f"Pre-flight {name}: {result.diagnosis}")
+
+        available, source = resolve_available_plugins(
+            deployer.kubectl, deployer.namespace,
+            router_repo=getattr(deployer, "router_repo", None),
+        )
+        result = check_manifest_compatibility(manifest_path, available, source)
+        if result.skipped_reason:
+            _log(f"Pre-flight plugins: skipped ({result.skipped_reason})")
+        elif not result.compatible:
+            _log(f"Pre-flight plugins FAIL: {result.diagnosis}")
+            pytest.fail(f"pre-flight [plugins]: {result.diagnosis}")
+        else:
+            _log(f"Pre-flight plugins: {result.diagnosis}")
 
     def test_01_prereq(self, deployer: Deployer, tc: TestCase):
         """LLMInferenceService CRD must be installed and manifest must exist."""
