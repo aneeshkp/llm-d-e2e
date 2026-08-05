@@ -80,6 +80,11 @@ def main():
 
     # Behavior
     parser.add_argument("--nocleanup", action="store_true", help="Keep resources after test")
+    parser.add_argument(
+        "--need-gpu",
+        action="store_true",
+        help="Run requiresGpu test cases (they are skipped by default; use on a GPU cluster)",
+    )
     parser.add_argument("--report-dir", default="reports", help="Report output directory")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
     parser.add_argument("--fail-fast", "-x", action="store_true", help="Stop on first failure")
@@ -96,6 +101,12 @@ def main():
         const="",
         help="Clone manifest repo (interactive if no branch given)",
     )
+    parser.add_argument(
+        "--manifest-repo",
+        default=MANIFEST_REPO,
+        metavar="URL",
+        help=f"Git repo to clone manifests from with --setup (default: {MANIFEST_REPO})",
+    )
 
     args = parser.parse_args()
 
@@ -108,12 +119,15 @@ def main():
         _list_profiles()
         return
 
+    if args.setup is None and args.manifest_repo != MANIFEST_REPO:
+        print("Warning: --manifest-repo has no effect without --setup", file=sys.stderr)
+
     if args.setup is not None:
         if args.setup == "":
-            ref = _interactive_setup() if sys.stdin.isatty() else "main"
+            ref = _interactive_setup(args.manifest_repo) if sys.stdin.isatty() else "main"
         else:
             ref = args.setup
-        _setup_manifests(ref)
+        _setup_manifests(ref, args.manifest_repo)
         sys.stdout.flush()
         if not args.testcase and not args.profile:
             return
@@ -154,6 +168,8 @@ def main():
         pytest_args.append("--disable-auth")
     if args.nocleanup:
         pytest_args.append("--nocleanup")
+    if args.need_gpu:
+        pytest_args.append("--need-gpu")
     if args.verbose:
         pytest_args.append("-v")
     if args.fail_fast:
@@ -211,8 +227,7 @@ def _list_profiles():
         print(f"  {'':20s} tests: {cases}")
 
 
-def _interactive_setup() -> str:
-    repo = MANIFEST_REPO
+def _interactive_setup(repo: str = MANIFEST_REPO) -> str:
     print(f"Fetching branches from {repo}...")
     result = subprocess.run(
         ["git", "ls-remote", "--heads", repo],
@@ -241,11 +256,10 @@ def _interactive_setup() -> str:
     return "main"
 
 
-def _setup_manifests(ref: str):
+def _setup_manifests(ref: str, repo: str = MANIFEST_REPO):
     import yaml
     from datetime import datetime, timezone
 
-    repo = MANIFEST_REPO
     manifest_dir = Path("deploy/manifests")
     manifest_dir.mkdir(parents=True, exist_ok=True)
 

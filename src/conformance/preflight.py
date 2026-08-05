@@ -41,23 +41,13 @@ def extract_required_plugins(manifest_path: Path) -> set[str]:
     manifest = docs[0] if docs else {}
 
     plugins: set[str] = set()
-    inline = (
-        manifest.get("spec", {})
-        .get("router", {})
-        .get("scheduler", {})
-        .get("config", {})
-        .get("inline", {})
-    )
-    for plugin in (inline.get("plugins") or []):
+    inline = manifest.get("spec", {}).get("router", {}).get("scheduler", {}).get("config", {}).get("inline", {})
+    for plugin in inline.get("plugins") or []:
         ptype = plugin.get("type", "")
         if ptype and not plugin.get("optional", False):
             plugins.add(ptype)
 
-    sat_ref = (
-        inline.get("flowControl", {})
-        .get("saturationDetector", {})
-        .get("pluginRef", "")
-    )
+    sat_ref = inline.get("flowControl", {}).get("saturationDetector", {}).get("pluginRef", "")
     if sat_ref:
         plugins.add(sat_ref)
 
@@ -68,11 +58,17 @@ def probe_epp_plugins(kubectl_fn, namespace: str) -> frozenset[str] | None:
     """Layer 1: query a running EPP pod for registered plugins."""
     try:
         pods_raw = kubectl_fn(
-            "get", "pods",
-            "-l", "app.kubernetes.io/component=llminferenceservice-router-scheduler",
-            "--field-selector", "status.phase=Running",
-            "-o", "jsonpath={.items[0].metadata.name}",
-            "-n", namespace, check=False,
+            "get",
+            "pods",
+            "-l",
+            "app.kubernetes.io/component=llminferenceservice-router-scheduler",
+            "--field-selector",
+            "status.phase=Running",
+            "-o",
+            "jsonpath={.items[0].metadata.name}",
+            "-n",
+            namespace,
+            check=False,
         )
         if not pods_raw or not pods_raw.strip():
             return None
@@ -98,19 +94,29 @@ def extract_plugins_from_source(router_repo: str | Path, tag: str) -> frozenset[
     """Layer 2: extract plugin type strings from router Go source at a git tag."""
     result = subprocess.run(
         ["git", "grep", "-h", r'Type\s*\(PluginType\)\?=\s*"', tag, "--", "*.go"],
-        capture_output=True, text=True, cwd=str(router_repo),
+        capture_output=True,
+        text=True,
+        cwd=str(router_repo),
     )
     if not result.stdout.strip():
         result = subprocess.run(
             ["git", "grep", "-h", r'Type\s*=\s*"', tag, "--", "*.go"],
-            capture_output=True, text=True, cwd=str(router_repo),
+            capture_output=True,
+            text=True,
+            cwd=str(router_repo),
         )
 
     plugins = set(re.findall(r'"([a-z][a-z0-9-]+)"', result.stdout))
     non_plugins = {
-        "content-type", "custom", "default", "colliding-source-type",
-        "decode-only", "encode-decode", "encode-prefill-decode",
-        "header-based-testing-filter", "destination-endpoint-served-verifier",
+        "content-type",
+        "custom",
+        "default",
+        "colliding-source-type",
+        "decode-only",
+        "encode-decode",
+        "encode-prefill-decode",
+        "header-based-testing-filter",
+        "destination-endpoint-served-verifier",
     }
     return frozenset(plugins - non_plugins)
 
@@ -120,9 +126,13 @@ def _detect_epp_version_tag(kubectl_fn) -> str:
     for ns in ("redhat-ods-applications", "rhai-gitops", "rhaii"):
         try:
             raw = kubectl_fn(
-                "get", "llminferenceserviceconfig",
-                "-o", "jsonpath={.items[0].spec.router.scheduler.template.containers[0].image}",
-                "-n", ns, check=False,
+                "get",
+                "llminferenceserviceconfig",
+                "-o",
+                "jsonpath={.items[0].spec.router.scheduler.template.containers[0].image}",
+                "-n",
+                ns,
+                check=False,
             )
             if not raw or not raw.strip():
                 continue
@@ -160,10 +170,15 @@ def resolve_available_plugins(
                 if not epp_tag:
                     result = subprocess.run(
                         ["git", "tag", "--list", "v*.*.*", "--sort=v:refname"],
-                        capture_output=True, text=True, cwd=str(router_path),
+                        capture_output=True,
+                        text=True,
+                        cwd=str(router_path),
                     )
-                    tags = [t.strip() for t in result.stdout.splitlines()
-                            if t.strip() and "rc" not in t and "alpha" not in t]
+                    tags = [
+                        t.strip()
+                        for t in result.stdout.splitlines()
+                        if t.strip() and "rc" not in t and "alpha" not in t
+                    ]
                     if tags:
                         plugins = extract_plugins_from_source(router_path, tags[-1])
                         if plugins:
@@ -188,13 +203,15 @@ def check_manifest_compatibility(
 
     if not required:
         return PreflightResult(
-            compatible=True, source=source,
+            compatible=True,
+            source=source,
             diagnosis="No custom plugins — uses defaults",
         )
 
     if available_plugins is None:
         return PreflightResult(
-            compatible=True, required_plugins=required,
+            compatible=True,
+            required_plugins=required,
             skipped_reason="could not detect available plugins",
             diagnosis="Pre-flight skipped: no detection method available",
         )
@@ -203,14 +220,18 @@ def check_manifest_compatibility(
 
     if not missing:
         return PreflightResult(
-            compatible=True, required_plugins=required,
-            available_count=len(available_plugins), source=source,
+            compatible=True,
+            required_plugins=required,
+            available_count=len(available_plugins),
+            source=source,
             diagnosis=f"All {len(required)} required plugins available ({source})",
         )
 
     return PreflightResult(
-        compatible=False, missing_plugins=missing,
-        required_plugins=required, available_count=len(available_plugins),
+        compatible=False,
+        missing_plugins=missing,
+        required_plugins=required,
+        available_count=len(available_plugins),
         source=source,
         diagnosis=(
             f"Manifest requires {len(missing)} plugin(s) not available "
@@ -222,6 +243,7 @@ def check_manifest_compatibility(
 
 
 # --- Check 2: API version compatibility ---
+
 
 def check_api_version(manifest_path: Path, kubectl_fn) -> PreflightResult:
     """Check if the manifest's apiVersion is served by the cluster's CRD."""
@@ -236,8 +258,11 @@ def check_api_version(manifest_path: Path, kubectl_fn) -> PreflightResult:
 
     try:
         raw = kubectl_fn(
-            "get", "crd", "llminferenceservices.serving.kserve.io",
-            "-o", "jsonpath={.spec.versions[?(@.served==true)].name}",
+            "get",
+            "crd",
+            "llminferenceservices.serving.kserve.io",
+            "-o",
+            "jsonpath={.spec.versions[?(@.served==true)].name}",
             check=False,
         )
         if not raw or not raw.strip():
@@ -250,10 +275,7 @@ def check_api_version(manifest_path: Path, kubectl_fn) -> PreflightResult:
     if version not in served:
         return PreflightResult(
             compatible=False,
-            diagnosis=(
-                f"Manifest uses apiVersion '{api_version}' but the cluster CRD "
-                f"only serves {sorted(served)}."
-            ),
+            diagnosis=(f"Manifest uses apiVersion '{api_version}' but the cluster CRD only serves {sorted(served)}."),
         )
 
     return PreflightResult(
@@ -264,15 +286,20 @@ def check_api_version(manifest_path: Path, kubectl_fn) -> PreflightResult:
 
 # --- Check 3: Image existence ---
 
+
 def check_image_existence(kubectl_fn) -> PreflightResult:
     """Check if the EPP image referenced in LLMInferenceServiceConfig is pullable."""
     epp_image = ""
     for ns in ("redhat-ods-applications", "rhai-gitops", "rhaii"):
         try:
             raw = kubectl_fn(
-                "get", "llminferenceserviceconfig",
-                "-o", "jsonpath={.items[0].spec.router.scheduler.template.containers[0].image}",
-                "-n", ns, check=False,
+                "get",
+                "llminferenceserviceconfig",
+                "-o",
+                "jsonpath={.items[0].spec.router.scheduler.template.containers[0].image}",
+                "-n",
+                ns,
+                check=False,
             )
             if raw and raw.strip():
                 epp_image = raw.strip().split()[0]
@@ -286,7 +313,9 @@ def check_image_existence(kubectl_fn) -> PreflightResult:
     try:
         result = subprocess.run(
             ["skopeo", "inspect", "--raw", f"docker://{epp_image}"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         if result.returncode != 0:
             stderr = result.stderr.strip()[:200].lower()

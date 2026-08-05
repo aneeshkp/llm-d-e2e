@@ -3,6 +3,7 @@
 Each test case runs through ordered phases (phases skip when disabled in
 config, when the manifest is missing, or when deploy failed / discover mode):
 
+  00. Preflight — API version, images, EPP plugin compatibility
   01. Prerequisites — CRD exists; manifest file present for branch
   02. Deploy — apply LLMInferenceService manifest (skipped in discover mode)
   03. Service — wait for Service creation
@@ -71,6 +72,15 @@ def _require_deployed(deployer: Deployer, tc: TestCase, test_mode: str) -> None:
         pytest.skip(f"skipped — deploy failed or was skipped for '{tc.name}'")
 
 
+def _require_gpu(deployer: Deployer, tc: TestCase, mock_mode: bool, need_gpu: bool, test_mode: str) -> None:
+    if test_mode == "discover" or not tc.deployment.requires_gpu or mock_mode:
+        return
+    if not need_gpu:
+        pytest.skip(f"'{tc.name}' requires a GPU — pass --need-gpu to run it")
+    if deployer.cluster_gpu_count() == 0:
+        pytest.skip(f"'{tc.name}' requires a GPU but cluster has no allocatable nvidia.com/gpu")
+
+
 def _check_threshold(name: str, value: float, min_value: float | None = None, max_value: float | None = None) -> bool:
     passed = True
     if min_value is not None and value < min_value:
@@ -112,7 +122,8 @@ class TestConformance:
                 _log(f"Pre-flight {name}: {result.diagnosis}")
 
         available, source = resolve_available_plugins(
-            deployer.kubectl, deployer.namespace,
+            deployer.kubectl,
+            deployer.namespace,
             router_repo=getattr(deployer, "router_repo", None),
         )
         result = check_manifest_compatibility(manifest_path, available, source)
@@ -124,9 +135,10 @@ class TestConformance:
         else:
             _log(f"Pre-flight plugins: {result.diagnosis}")
 
-    def test_01_prereq(self, deployer: Deployer, tc: TestCase):
+    def test_01_prereq(self, deployer: Deployer, tc: TestCase, mock_mode: bool, need_gpu: bool, test_mode: str):
         """LLMInferenceService CRD must be installed and manifest must exist."""
         _require_manifest(tc)
+        _require_gpu(deployer, tc, mock_mode, need_gpu, test_mode)  # skip following step if no GPU detected.
         found = deployer.check_crd_exists(LLMISVC_CRD)
         _log(f"CRD {LLMISVC_CRD}: {'found' if found else 'NOT FOUND'}")
         if not found:
@@ -141,11 +153,12 @@ class TestConformance:
                 )
             assert False, f"CRD {LLMISVC_CRD} not found"
 
-    def test_02_deploy(self, deployer: Deployer, tc: TestCase, test_mode: str):
+    def test_02_deploy(self, deployer: Deployer, tc: TestCase, test_mode: str, mock_mode: bool, need_gpu: bool):
         """Deploy the LLMInferenceService manifest."""
         if test_mode == "discover":
             pytest.skip("discover mode — skipping deploy")
         _require_manifest(tc)
+        _require_gpu(deployer, tc, mock_mode, need_gpu, test_mode)  # skip following step if no GPU detected.
         if not deployer.check_crd_exists(LLMISVC_CRD):
             pytest.skip(f"CRD {LLMISVC_CRD} not found — cannot deploy")
         _log(f"Deploying {tc.deployment.manifest_path} as '{tc.name}'")
