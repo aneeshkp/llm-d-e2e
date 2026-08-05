@@ -14,6 +14,7 @@ Validators (wired from ``test_conformance`` phases 10–15 / 21):
   - ``validate_vllm_basic`` — request_success on workload pods
   - ``validate_cache_aware`` — prefix cache queries/hits (+ EPP indexer)
   - ``validate_pd`` — decode/prefill token-by-source and NIXL transfer signals
+  - ``validate_through_epp`` — before/after ``SCHED_E2E`` delta (gateway path)
   - ``validate_scheduler`` — EPP request / ready-pod metrics
   - ``validate_flow_control`` — EPP dispatch / queue / saturation
   - ``validate_lora`` — ``vllm:lora_requests_info`` on workload pods
@@ -482,6 +483,35 @@ def validate_pd(decode: list[ScrapeResult], prefill: list[ScrapeResult]) -> list
         )
     )
     return checks
+
+
+def epp_metric_total(epp: list[ScrapeResult], name: str) -> float:
+    """Sum a metric across all EPP scrape results (missing treated as 0)."""
+    return sum((r.get(name) or 0.0) for r in epp)
+
+
+def epp_has_metric(epp: list[ScrapeResult], name: str) -> bool:
+    """True if at least one EPP scrape result exposes ``name``."""
+    return any(r.has(name) for r in epp)
+
+
+def validate_through_epp(before: float, after: float, min_delta: float = 1.0) -> CheckResult:
+    """Assert EPP scheduler_e2e increased after a gateway inference request.
+
+    Tokens can succeed while bypassing EPP (wrong GatewayClass, zero EPP
+    replicas, or a pod-direct client). A positive delta proves at least one
+    request was scheduled through the endpoint picker in the scrape window
+    (not necessarily the probe under concurrent load).
+    """
+    delta = after - before
+    return CheckResult(
+        name="through_epp_delta",
+        metric=SCHED_E2E,
+        source="epp-aggregate",
+        value=delta,
+        passed=delta >= min_delta,
+        message=(f"scheduler_e2e before={before:g} after={after:g} delta={delta:g} (need >= {min_delta:g})"),
+    )
 
 
 def validate_scheduler(epp: list[ScrapeResult]) -> list[CheckResult]:

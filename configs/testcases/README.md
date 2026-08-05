@@ -41,7 +41,7 @@ Enable only what the topology proves:
 | `checkVLLM` | 10 | Any workload |
 | `checkPrefixCache` | 11 | Prefix KV cache / cache-aware routing |
 | `checkPD` | 12, 21 | Prefill/decode disaggregation |
-| `checkScheduler` | 13 | EPP / scheduler present |
+| `checkScheduler` | 09b, 13 | Through-EPP delta + EPP / scheduler present |
 | `checkFlowControl` | 14 | Flow-control EPP |
 | `checkLora` | 15 | LoRA adapters on vLLM |
 | `checkNIXL` | — | Reserved (no validator yet) |
