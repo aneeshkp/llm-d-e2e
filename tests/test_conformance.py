@@ -41,12 +41,12 @@ from conformance.metrics import (
     dump_raw_metrics,
     epp_has_metric,
     epp_metric_total,
+    probe_through_epp,
     validate_cache_aware,
     validate_flow_control,
     validate_lora,
     validate_pd,
     validate_scheduler,
-    validate_through_epp,
     validate_vllm_basic,
 )
 
@@ -271,25 +271,11 @@ class TestConformance:
 
         # Counter is usually updated before the HTTP response returns; retry in case
         # kubectl scrape / port-forward is briefly stale on a busy API server.
-        delays_s = (0, 2, 5, 10)
-        check = None
-        for attempt, delay in enumerate(delays_s, start=1):
-            if delay:
-                time.sleep(delay)
-            after_scrapes = scraper.scrape_epp(tc.name)
-            assert after_scrapes, "No EPP metrics scraped after through-EPP probe"
-            if not epp_has_metric(after_scrapes, SCHED_E2E):
-                pytest.fail(
-                    f"EPP pods stopped exposing {SCHED_E2E} after the probe "
-                    f"(attempt {attempt}/{len(delays_s)}). Check metrics auth or pod restart."
-                )
-            after = epp_metric_total(after_scrapes, SCHED_E2E)
-            check = validate_through_epp(before, after)
-            _log(f"  attempt {attempt}/{len(delays_s)}: {check.message}")
-            if check.passed:
-                break
-
-        assert check is not None, "Through-EPP: no EPP scrape attempts completed"
+        check = probe_through_epp(
+            before,
+            lambda: scraper.scrape_epp(tc.name),
+            log_fn=_log,
+        )
         _log(f"  {check.name}: {'PASS' if check.passed else 'FAIL'} — {check.message}")
         assert check.passed, (
             f"Through-EPP: gateway returned tokens but EPP {SCHED_E2E} did not increase "
