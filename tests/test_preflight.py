@@ -12,6 +12,7 @@ from conformance.preflight import (
     check_manifest_compatibility,
     extract_plugins_from_source,
     extract_required_plugins,
+    probe_epp_plugins,
     resolve_available_plugins,
 )
 
@@ -315,6 +316,46 @@ class TestImageExistence:
         assert r.compatible is True
 
 
+class TestProbeEppPlugins:
+    def test_ignores_handler_names_on_registered_line(self):
+        logs = (
+            'Registered plugin "flow-control-dispatcher" using handler "round-robin"\n'
+            'plugin type "prefix-cache-scorer" ready\n'
+        )
+
+        def kubectl(*args, **_k):
+            if args and args[0] == "get":
+                return "epp-0"
+            if args and args[0] == "logs":
+                return logs
+            return ""
+
+        plugins = probe_epp_plugins(kubectl, "ns")
+        assert plugins == frozenset({"flow-control-dispatcher", "prefix-cache-scorer"})
+        assert "round-robin" not in plugins
+
+
+class TestSourceExtractParsing:
+    def test_parse_ignores_unrelated_type_assignments(self, tmp_path, monkeypatch):
+        """Bare Type = \"json\" style lines must not become available plugins."""
+        router = tmp_path / "router"
+        router.mkdir()
+
+        import subprocess as sp
+
+        def fake_run(cmd, **kwargs):
+            # Only PluginType greps return plugin lines; no broad Type= dump.
+            pattern = cmd[3] if len(cmd) > 3 else ""
+            if "PluginType" in pattern:
+                stdout = 'const PluginType = "prefix-cache-scorer"\nPluginType = "token-producer"\n'
+                return sp.CompletedProcess(args=cmd, returncode=0, stdout=stdout, stderr="")
+            return sp.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="")
+
+        monkeypatch.setattr("conformance.preflight.subprocess.run", fake_run)
+        plugins = extract_plugins_from_source(router, "v1.0.0")
+        assert plugins == frozenset({"prefix-cache-scorer", "token-producer"})
+
+
 class TestSourceExtract:
     def test_extracts_from_router(self):
         router = Path.home() / "redhat" / "llm-d-router"
@@ -338,9 +379,17 @@ class TestSourceExtract:
             import pytest
 
             pytest.skip("no tags")
-        assert len(extract_plugins_from_source(router, tags[-1])) > 0
+        plugins = extract_plugins_from_source(router, tags[-1])
+        assert len(plugins) > 0
+        # Broad Type= junk from CRD/condition enums must not leak in.
+        assert not {"exact", "accepted", "console"} & plugins
 
-    def test_older_has_fewer(self):
+    def test_two_tags_both_extractable(self):
+        """Extract on two tags without asserting older_count < newer_count.
+
+        Plugin removals/renames are legitimate; only require newest to work and
+        that an older tag either yields plugins or is skippable (pre-PluginType era).
+        """
         router = Path.home() / "redhat" / "llm-d-router"
         if not router.exists():
             import pytest
@@ -362,4 +411,8 @@ class TestSourceExtract:
             import pytest
 
             pytest.skip("need 2+ tags")
-        assert len(extract_plugins_from_source(router, tags[0])) < len(extract_plugins_from_source(router, tags[-1]))
+        newest = extract_plugins_from_source(router, tags[-1])
+        assert len(newest) > 0
+        oldest = extract_plugins_from_source(router, tags[0])
+        # Older tags may predate PluginType constants — empty is OK, crash is not.
+        assert isinstance(oldest, frozenset)

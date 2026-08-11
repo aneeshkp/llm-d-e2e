@@ -88,9 +88,14 @@ def probe_epp_plugins(kubectl_fn, namespace: str) -> frozenset[str] | None:
             return None
 
         plugins = set()
+        # Only the name after "registered plugin" / "plugin type" — not every
+        # quoted token on the line (handlers, modes, etc.).
+        name_re = re.compile(
+            r'(?:registered plugin|plugin type)\s+"([a-z][a-z0-9-]+)"',
+            re.IGNORECASE,
+        )
         for line in logs.splitlines():
-            if "registered plugin" in line.lower() or "plugin type" in line.lower():
-                plugins.update(re.findall(r'"([a-z][a-z0-9-]+)"', line))
+            plugins.update(name_re.findall(line))
 
         if plugins:
             return frozenset(plugins)
@@ -99,23 +104,30 @@ def probe_epp_plugins(kubectl_fn, namespace: str) -> frozenset[str] | None:
     return None
 
 
+_PLUGIN_TYPE_ASSIGN = re.compile(r'(?:Type\s*\(PluginType\)|PluginType|Type)\s*=\s*"([a-z][a-z0-9-]+)"')
+
+
 def extract_plugins_from_source(router_repo: str | Path, tag: str) -> frozenset[str]:
     """Layer 2: extract plugin type strings from router Go source at a git tag."""
-    result = subprocess.run(
-        ["git", "grep", "-h", r'Type\s*\(PluginType\)\?=\s*"', tag, "--", "*.go"],
-        capture_output=True,
-        text=True,
-        cwd=str(router_repo),
+    # Prefer PluginType assignments; avoid bare Type = "..." which matches
+    # unrelated Go fields (content-type, json, grpc, etc.).
+    patterns = (
+        r'Type\s*\(PluginType\)\s*=\s*"',
+        r'PluginType\s*=\s*"',
     )
-    if not result.stdout.strip():
+    stdout_parts: list[str] = []
+    for pattern in patterns:
         result = subprocess.run(
-            ["git", "grep", "-h", r'Type\s*=\s*"', tag, "--", "*.go"],
+            ["git", "grep", "-h", pattern, tag, "--", "*.go"],
             capture_output=True,
             text=True,
             cwd=str(router_repo),
         )
+        if result.stdout.strip():
+            stdout_parts.append(result.stdout)
 
-    plugins = set(re.findall(r'"([a-z][a-z0-9-]+)"', result.stdout))
+    combined = "\n".join(stdout_parts)
+    plugins = set(_PLUGIN_TYPE_ASSIGN.findall(combined))
     non_plugins = {
         "content-type",
         "custom",
