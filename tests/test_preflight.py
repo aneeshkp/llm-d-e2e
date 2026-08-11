@@ -12,6 +12,7 @@ from conformance.preflight import (
     check_manifest_compatibility,
     extract_plugins_from_source,
     extract_required_plugins,
+    resolve_available_plugins,
 )
 
 
@@ -58,6 +59,18 @@ class TestExtractRequiredPlugins:
             )
         assert extract_required_plugins(path) == set()
 
+    def test_scheduler_null_does_not_raise(self, tmp_path):
+        path = tmp_path / "sched-null.yaml"
+        with open(path, "w") as f:
+            yaml.dump(
+                {
+                    "apiVersion": "v1",
+                    "spec": {"router": {"scheduler": None}},
+                },
+                f,
+            )
+        assert extract_required_plugins(path) == set()
+
     def test_saturation_detector_ref(self, tmp_path):
         path = _write_manifest(
             tmp_path,
@@ -92,6 +105,69 @@ class TestCheckManifestCompatibility:
         r = check_manifest_compatibility(path, None)
         assert r.compatible is True
         assert "could not detect" in r.skipped_reason
+
+
+class TestResolveAvailablePlugins:
+    def test_falls_back_to_latest_when_cluster_tag_absent_locally(self, tmp_path, monkeypatch):
+        """Cluster tag not in local repo tags → use latest (clone is incomplete)."""
+        router = tmp_path / "router"
+        router.mkdir()
+
+        def kubectl(*_a, **_k):
+            return ""
+
+        monkeypatch.setattr(
+            "conformance.preflight.probe_epp_plugins",
+            lambda *_a, **_k: None,
+        )
+        monkeypatch.setattr(
+            "conformance.preflight._detect_epp_version_tag",
+            lambda *_a, **_k: "v9.9.9",
+        )
+
+        def fake_extract(_repo, tag: str):
+            if tag == "v9.9.9":
+                return frozenset()
+            if tag == "v1.2.3":
+                return frozenset({"plugin-a"})
+            return frozenset()
+
+        monkeypatch.setattr("conformance.preflight.extract_plugins_from_source", fake_extract)
+        monkeypatch.setattr(
+            "conformance.preflight._list_release_tags",
+            lambda _repo: ["v1.0.0", "v1.2.3"],
+        )
+
+        plugins, source = resolve_available_plugins(kubectl, "ns", router_repo=router)
+        assert plugins == frozenset({"plugin-a"})
+        assert "v1.2.3" in source
+        assert "v9.9.9" in source
+
+    def test_skips_when_exact_tag_exists_but_extract_empty(self, tmp_path, monkeypatch):
+        """Tag exists locally but extract empty → fail closed (do not use latest)."""
+        router = tmp_path / "router"
+        router.mkdir()
+
+        monkeypatch.setattr(
+            "conformance.preflight.probe_epp_plugins",
+            lambda *_a, **_k: None,
+        )
+        monkeypatch.setattr(
+            "conformance.preflight._detect_epp_version_tag",
+            lambda *_a, **_k: "v1.2.3",
+        )
+        monkeypatch.setattr(
+            "conformance.preflight.extract_plugins_from_source",
+            lambda _repo, _tag: frozenset(),
+        )
+        monkeypatch.setattr(
+            "conformance.preflight._list_release_tags",
+            lambda _repo: ["v1.0.0", "v1.2.3"],
+        )
+
+        plugins, source = resolve_available_plugins(lambda *_a, **_k: "", "ns", router_repo=router)
+        assert plugins is None
+        assert source == "no detection method available"
 
 
 class TestApiVersionCheck:

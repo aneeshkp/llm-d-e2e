@@ -97,19 +97,25 @@ def _check_threshold(name: str, value: float, min_value: float | None = None, ma
 class TestConformance:
     """Ordered conformance phases for each test case."""
 
-    def test_00_preflight(self, deployer: Deployer, tc: TestCase):
+    def test_00_preflight(self, deployer: Deployer, tc: TestCase, test_mode: str):
         """Pre-flight: verify manifest is compatible with the cluster.
 
         Three checks: API version, image existence, plugin compatibility.
         Each skips safely if detection is unavailable.
+
+        In discover mode, skip image existence (apply/pull oriented) but keep
+        API version and plugin checks — live EPP probe is most useful there.
         """
         _require_manifest(tc)
         manifest_path = _MANIFEST_DIR / tc.deployment.manifest_path
 
         checks = [
             ("api_version", lambda: check_api_version(manifest_path, deployer.kubectl)),
-            ("image_existence", lambda: check_image_existence(deployer.kubectl)),
         ]
+        if test_mode != "discover":
+            checks.append(("image_existence", lambda: check_image_existence(deployer.kubectl)))
+        else:
+            _log("Pre-flight image_existence: skipped (discover mode)")
 
         for name, check_fn in checks:
             result = check_fn()
@@ -124,7 +130,7 @@ class TestConformance:
         available, source = resolve_available_plugins(
             deployer.kubectl,
             deployer.namespace,
-            router_repo=getattr(deployer, "router_repo", None),
+            router_repo=deployer.router_repo or None,
         )
         result = check_manifest_compatibility(manifest_path, available, source)
         if result.skipped_reason:

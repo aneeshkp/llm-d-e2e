@@ -81,6 +81,7 @@ class Deployer:
         manifest_dir: str = "deploy/manifests",
         decode_node_selector: str = "",
         prefill_node_selector: str = "",
+        router_repo: str = "",
     ):
         self.kubeconfig = kubeconfig
         self.platform = platform
@@ -93,6 +94,7 @@ class Deployer:
         self.manifest_dir = Path(manifest_dir)
         self.decode_node_selector = _parse_node_selector(decode_node_selector)
         self.prefill_node_selector = _parse_node_selector(prefill_node_selector)
+        self.router_repo = router_repo
         self._port_forward_proc: subprocess.Popen | None = None
         self._port_forward_port: int = 0
         self._pod_pf_proc: subprocess.Popen | None = None

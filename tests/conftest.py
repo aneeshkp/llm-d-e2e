@@ -81,6 +81,11 @@ def pytest_addoption(parser):
     parser.addoption("--guidellm-image", default="", help="GuideLLM benchmark image override")
     parser.addoption("--decode-node-selector", default="", help="Node selector for decode pods (key=value)")
     parser.addoption("--prefill-node-selector", default="", help="Node selector for prefill pods (key=value)")
+    parser.addoption(
+        "--router-repo",
+        default="",
+        help="Local llm-d-router checkout for preflight Layer-2 plugin source extract",
+    )
 
 
 def _resolve_test_cases(config) -> list[TestCase]:
@@ -119,6 +124,7 @@ def deployer(request) -> Deployer:
         disable_auth=request.config.getoption("--disable-auth"),
         decode_node_selector=request.config.getoption("--decode-node-selector"),
         prefill_node_selector=request.config.getoption("--prefill-node-selector"),
+        router_repo=request.config.getoption("--router-repo"),
     )
     yield d
     d.stop_port_forward()

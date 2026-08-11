@@ -41,13 +41,22 @@ def extract_required_plugins(manifest_path: Path) -> set[str]:
     manifest = docs[0] if docs else {}
 
     plugins: set[str] = set()
-    inline = manifest.get("spec", {}).get("router", {}).get("scheduler", {}).get("config", {}).get("inline", {})
+    # Explicit YAML nulls (e.g. scheduler: null) must not crash — treat like missing.
+    spec = manifest.get("spec") or {}
+    router = spec.get("router") or {}
+    scheduler = router.get("scheduler") or {}
+    config = scheduler.get("config") or {}
+    inline = config.get("inline") or {}
     for plugin in inline.get("plugins") or []:
+        if not isinstance(plugin, dict):
+            continue
         ptype = plugin.get("type", "")
         if ptype and not plugin.get("optional", False):
             plugins.add(ptype)
 
-    sat_ref = inline.get("flowControl", {}).get("saturationDetector", {}).get("pluginRef", "")
+    flow = inline.get("flowControl") or {}
+    sat = flow.get("saturationDetector") or {}
+    sat_ref = sat.get("pluginRef") or ""
     if sat_ref:
         plugins.add(sat_ref)
 
@@ -146,6 +155,17 @@ def _detect_epp_version_tag(kubectl_fn) -> str:
     return ""
 
 
+def _list_release_tags(router_path: Path) -> list[str]:
+    """Stable release tags in the router checkout (no rc/alpha), sorted ascending."""
+    result = subprocess.run(
+        ["git", "tag", "--list", "v*.*.*", "--sort=v:refname"],
+        capture_output=True,
+        text=True,
+        cwd=str(router_path),
+    )
+    return [t.strip() for t in result.stdout.splitlines() if t.strip() and "rc" not in t and "alpha" not in t]
+
+
 def resolve_available_plugins(
     kubectl_fn,
     namespace: str,
@@ -156,39 +176,57 @@ def resolve_available_plugins(
     if live:
         return live, f"live probe ({len(live)} plugins)"
 
-    if router_repo:
-        router_path = Path(router_repo)
-        if router_path.exists():
-            try:
-                epp_tag = _detect_epp_version_tag(kubectl_fn)
-                if epp_tag:
-                    plugins = extract_plugins_from_source(router_path, epp_tag)
-                    if plugins:
-                        return plugins, f"source extract at {epp_tag} ({len(plugins)} plugins)"
-                    log.info("Tag %s found but no plugins extracted — tag may not exist in router repo", epp_tag)
+    if not router_repo:
+        return None, "no detection method available"
 
-                if not epp_tag:
-                    result = subprocess.run(
-                        ["git", "tag", "--list", "v*.*.*", "--sort=v:refname"],
-                        capture_output=True,
-                        text=True,
-                        cwd=str(router_path),
+    router_path = Path(router_repo)
+    if not router_path.exists():
+        return None, "no detection method available"
+
+    try:
+        epp_tag = _detect_epp_version_tag(kubectl_fn)
+        tags = _list_release_tags(router_path)
+
+        if epp_tag:
+            plugins = extract_plugins_from_source(router_path, epp_tag)
+            if plugins:
+                return plugins, f"source extract at {epp_tag} ({len(plugins)} plugins)"
+            # Tag present in local repo but extract empty → fail closed (skip).
+            # Using "latest" here would false-pass: newer source ≠ cluster EPP.
+            if epp_tag in tags:
+                log.info(
+                    "Tag %s exists locally but yielded no plugins — skipping Layer-2 "
+                    "(not falling back to latest; that could false-pass)",
+                    epp_tag,
+                )
+                return None, "no detection method available"
+            log.info(
+                "Cluster tag %s not in local router tags — falling back to latest",
+                epp_tag,
+            )
+
+        # Latest-tag fallback: no cluster tag, OR cluster tag absent from local clone.
+        if tags:
+            latest = tags[-1]
+            plugins = extract_plugins_from_source(router_path, latest)
+            if plugins:
+                if epp_tag:
+                    log.warning(
+                        "Using latest tag %s — cluster tag %s missing from local router repo",
+                        latest,
+                        epp_tag,
                     )
-                    tags = [
-                        t.strip()
-                        for t in result.stdout.splitlines()
-                        if t.strip() and "rc" not in t and "alpha" not in t
-                    ]
-                    if tags:
-                        plugins = extract_plugins_from_source(router_path, tags[-1])
-                        if plugins:
-                            log.warning(
-                                "Using latest tag %s — could not determine cluster EPP version",
-                                tags[-1],
-                            )
-                            return plugins, f"source extract at {tags[-1]} (latest — cluster version unknown)"
-            except Exception:
-                pass
+                    return (
+                        plugins,
+                        f"source extract at {latest} (latest — cluster tag {epp_tag} absent locally)",
+                    )
+                log.warning(
+                    "Using latest tag %s — could not determine cluster EPP version",
+                    latest,
+                )
+                return plugins, f"source extract at {latest} (latest — cluster version unknown)"
+    except Exception:
+        pass
 
     return None, "no detection method available"
 
