@@ -272,7 +272,7 @@ class TestConformance:
         # Counter is usually updated before the HTTP response returns; retry in case
         # kubectl scrape / port-forward is briefly stale on a busy API server.
         delays_s = (0, 2, 5, 10)
-        check = validate_through_epp(before, before)
+        check = None
         for attempt, delay in enumerate(delays_s, start=1):
             if delay:
                 time.sleep(delay)
@@ -289,6 +289,7 @@ class TestConformance:
             if check.passed:
                 break
 
+        assert check is not None, "Through-EPP: no EPP scrape attempts completed"
         _log(f"  {check.name}: {'PASS' if check.passed else 'FAIL'} — {check.message}")
         assert check.passed, (
             f"Through-EPP: gateway returned tokens but EPP {SCHED_E2E} did not increase "
