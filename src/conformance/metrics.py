@@ -14,6 +14,8 @@ Validators (wired from ``test_conformance`` phases 10–15 / 21):
   - ``validate_vllm_basic`` — request_success on workload pods
   - ``validate_cache_aware`` — prefix cache queries/hits (+ EPP indexer)
   - ``validate_pd`` — decode/prefill token-by-source and NIXL transfer signals
+  - ``validate_through_epp`` — before/after ``SCHED_E2E`` delta (gateway path)
+  - ``probe_through_epp`` — retry scrape loop around ``validate_through_epp``
   - ``validate_scheduler`` — EPP request / ready-pod metrics
   - ``validate_flow_control`` — EPP dispatch / queue / saturation
   - ``validate_lora`` — ``vllm:lora_requests_info`` on workload pods
@@ -29,6 +31,7 @@ import re
 import socket
 import subprocess
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -489,6 +492,76 @@ def validate_pd(decode: list[ScrapeResult], prefill: list[ScrapeResult]) -> list
         )
     )
     return checks
+
+
+def epp_metric_total(epp: list[ScrapeResult], name: str) -> float:
+    """Sum a metric across all EPP scrape results (missing treated as 0)."""
+    return sum((r.get(name) or 0.0) for r in epp)
+
+
+def epp_has_metric(epp: list[ScrapeResult], name: str) -> bool:
+    """True if at least one EPP scrape result exposes ``name``."""
+    return any(r.has(name) for r in epp)
+
+
+def validate_through_epp(before: float, after: float, min_delta: float = 1.0) -> CheckResult:
+    """Assert EPP scheduler_e2e increased after a gateway inference request.
+
+    Tokens can succeed while bypassing EPP (wrong GatewayClass, zero EPP
+    replicas, or a pod-direct client). A positive delta proves at least one
+    request was scheduled through the endpoint picker in the scrape window
+    (not necessarily the probe under concurrent load).
+    """
+    delta = after - before
+    return CheckResult(
+        name="through_epp_delta",
+        metric=SCHED_E2E,
+        source="epp-aggregate",
+        value=delta,
+        passed=delta >= min_delta,
+        message=(f"scheduler_e2e before={before:g} after={after:g} delta={delta:g} (need >= {min_delta:g})"),
+    )
+
+
+def probe_through_epp(
+    before: float,
+    scrape_fn: Callable[[], list[ScrapeResult]],
+    delays_s: Sequence[float] = (0, 2, 5, 10),
+    *,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    log_fn: Callable[[str], None] | None = None,
+    min_delta: float = 1.0,
+) -> CheckResult:
+    """Re-scrape EPP until ``SCHED_E2E`` rises by ``min_delta``, or delays exhaust.
+
+    ``scrape_fn`` is injected so unit tests can return canned ``ScrapeResult``s
+    without kubectl. Raises ``RuntimeError`` if a scrape is empty or the metric
+    disappears mid-loop (pod restart / metrics auth loss).
+    """
+    if not delays_s:
+        raise ValueError("delays_s must contain at least one attempt")
+
+    check: CheckResult | None = None
+    for attempt, delay in enumerate(delays_s, start=1):
+        if delay:
+            sleep_fn(delay)
+        scrapes = scrape_fn()
+        if not scrapes:
+            raise RuntimeError("No EPP metrics scraped after through-EPP probe")
+        if not epp_has_metric(scrapes, SCHED_E2E):
+            raise RuntimeError(
+                f"EPP pods stopped exposing {SCHED_E2E} after the probe "
+                f"(attempt {attempt}/{len(delays_s)}). Check metrics auth or pod restart."
+            )
+        after = epp_metric_total(scrapes, SCHED_E2E)
+        check = validate_through_epp(before, after, min_delta=min_delta)
+        if log_fn is not None:
+            log_fn(f"  attempt {attempt}/{len(delays_s)}: {check.message}")
+        if check.passed:
+            break
+
+    assert check is not None
+    return check
 
 
 def validate_scheduler(epp: list[ScrapeResult]) -> list[CheckResult]:

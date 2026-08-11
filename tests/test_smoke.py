@@ -25,7 +25,16 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from conformance.config import load_testcase, load_profile, load_testcases_from_dir, parse_duration
-from conformance.metrics import parse_prometheus
+from conformance.metrics import (
+    SCHED_E2E,
+    Metric,
+    ScrapeResult,
+    epp_has_metric,
+    epp_metric_total,
+    parse_prometheus,
+    probe_through_epp,
+    validate_through_epp,
+)
 from conformance.client import LLMClient
 
 
@@ -91,6 +100,95 @@ vllm:gpu_cache_usage_perc 0.15
     assert metrics["vllm:request_success_total"][0].value == 42.0
     assert metrics["vllm:request_success_total"][0].labels["model_name"] == "Qwen/Qwen3-0.6B"
     assert metrics["vllm:gpu_cache_usage_perc"][0].value == 0.15
+
+
+def test_epp_metric_total_sums_and_treats_missing_as_zero():
+    a = ScrapeResult(source="epp-a", metrics={SCHED_E2E: [Metric(name=SCHED_E2E, value=3.0)]})
+    b = ScrapeResult(source="epp-b", metrics={})
+    assert epp_metric_total([a, b], SCHED_E2E) == 3.0
+    assert epp_metric_total([], SCHED_E2E) == 0.0
+    assert epp_has_metric([a, b], SCHED_E2E)
+    assert not epp_has_metric([b], SCHED_E2E)
+    assert not epp_has_metric([], SCHED_E2E)
+
+
+def test_validate_through_epp_delta():
+    ok = validate_through_epp(before=5.0, after=6.0)
+    assert ok.passed
+    assert ok.value == 1.0
+    bypass = validate_through_epp(before=5.0, after=5.0)
+    assert not bypass.passed
+    assert "delta=0" in bypass.message
+    # Pod restart resets the counter; after < before must fail (not abs(delta)).
+    reset = validate_through_epp(before=10.0, after=2.0)
+    assert not reset.passed
+    assert reset.value == -8.0
+    assert "delta=-8" in reset.message
+
+
+def _epp_scrape(value: float | None) -> list[ScrapeResult]:
+    """Canned EPP scrape: None means metric absent."""
+    if value is None:
+        return [ScrapeResult(source="epp-a", metrics={})]
+    return [ScrapeResult(source="epp-a", metrics={SCHED_E2E: [Metric(name=SCHED_E2E, value=value)]})]
+
+
+def test_probe_through_epp_stops_on_pass():
+    calls: list[float | None] = [5.0, 6.0, 99.0]
+    seen: list[int] = []
+
+    def scrape_fn() -> list[ScrapeResult]:
+        seen.append(len(seen))
+        return _epp_scrape(calls[len(seen) - 1])
+
+    check = probe_through_epp(
+        before=5.0,
+        scrape_fn=scrape_fn,
+        delays_s=(0, 0, 0),
+        sleep_fn=lambda _: None,
+    )
+    assert check.passed
+    assert check.value == 1.0
+    assert len(seen) == 2  # stale then pass; third canned value unused
+
+
+def test_probe_through_epp_metric_disappears():
+    calls: list[float | None] = [5.0, None]
+
+    def scrape_fn() -> list[ScrapeResult]:
+        return _epp_scrape(calls.pop(0))
+
+    with pytest.raises(RuntimeError, match="stopped exposing"):
+        probe_through_epp(
+            before=5.0,
+            scrape_fn=scrape_fn,
+            delays_s=(0, 0),
+            sleep_fn=lambda _: None,
+        )
+
+
+def test_probe_through_epp_empty_scrape():
+    with pytest.raises(RuntimeError, match="No EPP metrics scraped"):
+        probe_through_epp(
+            before=5.0,
+            scrape_fn=lambda: [],
+            delays_s=(0,),
+            sleep_fn=lambda _: None,
+        )
+
+
+def test_probe_through_epp_exhausted_still_failing():
+    def scrape_fn() -> list[ScrapeResult]:
+        return _epp_scrape(5.0)
+
+    check = probe_through_epp(
+        before=5.0,
+        scrape_fn=scrape_fn,
+        delays_s=(0, 0, 0),
+        sleep_fn=lambda _: None,
+    )
+    assert not check.passed
+    assert check.value == 0.0
 
 
 def test_llm_client_init():

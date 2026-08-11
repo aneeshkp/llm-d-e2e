@@ -328,6 +328,7 @@ test_06_ready           — wait for Ready=True
 test_07_health          — GET /health (direct pod)
 test_08_models          — GET /v1/models (direct pod)
 test_09_inference       — POST /v1/chat/completions (via gateway)
+test_09b_inference_through_epp — gateway chat increases EPP scheduler_e2e (delta >= 1)
 test_10_metrics_vllm    — vLLM request_success > 0
 test_11_metrics_cache   — prefix cache queries/hits
 test_12_metrics_pd      — P/D disaggregation metrics

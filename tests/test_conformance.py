@@ -12,6 +12,7 @@ config, when the manifest is missing, or when deploy failed / discover mode):
   07. Health — GET /health returns 200 (direct pod; bypasses gateway EPP)
   08. Models — GET /v1/models lists base model (+ LoRA adapters if configured)
   09. Inference — chat/completions (+ LoRA adapter inference if configured)
+  09b. Through-EPP — gateway chat must increase EPP scheduler_e2e (delta >= 1)
   10. Metrics (vLLM) — scrape workload pods; validate_vllm_basic
   11. Metrics (cache) — prefix KV cache hits (vLLM + EPP; soft-fail in --mock)
   12. Metrics (P/D) — prefill/decode token distribution
@@ -35,8 +36,12 @@ from conformance.config import TestCase, chat_prompt_to_messages
 from conformance.client import LLMClient
 from conformance.deployer import Deployer
 from conformance.metrics import (
+    SCHED_E2E,
     Scraper,
     dump_raw_metrics,
+    epp_has_metric,
+    epp_metric_total,
+    probe_through_epp,
     validate_cache_aware,
     validate_flow_control,
     validate_kvcache_offloading_cpu,
@@ -234,6 +239,57 @@ class TestConformance:
                 _log(f"Sending LoRA inference with adapter '{adapter_name}'...")
                 resp = client.chat(model=adapter_name, prompt="Test LoRA adapter inference")
                 _assert_chat_response(resp, f"LoRA adapter: {adapter_name}")
+
+    def test_09b_inference_through_epp(
+        self, client: LLMClient, deployer: Deployer, scraper: Scraper, tc: TestCase, test_mode: str
+    ):
+        """Gateway inference must increase EPP scheduler_e2e (proves traffic through EPP).
+
+        Tokens alone are insufficient: pod-direct or mis-routed gateway paths can
+        succeed while EPP never sees the request. Skip when scheduler metrics are
+        disabled (no EPP / no checkScheduler).
+        """
+        _require_deployed(deployer, tc, test_mode)
+        if not tc.validation.inference_check:
+            pytest.skip("inference check disabled")
+        mc = tc.validation.metrics_check
+        if not mc.enabled or not mc.check_scheduler:
+            pytest.skip("through-EPP check requires metricsCheck.checkScheduler")
+
+        deployer.ensure_metrics_rbac(tc.name)
+        before_scrapes = scraper.scrape_epp(tc.name)
+        assert before_scrapes, "No EPP metrics scraped before through-EPP probe"
+        if not epp_has_metric(before_scrapes, SCHED_E2E):
+            pytest.fail(
+                f"EPP pods do not expose {SCHED_E2E}. Cannot prove through-EPP routing. "
+                "Check EPP version/image, metrics scrape labels, or metrics-endpoint auth "
+                "(ensure_metrics_rbac / bearer token for :9090)."
+            )
+        before = epp_metric_total(before_scrapes, SCHED_E2E)
+        _log(f"EPP {SCHED_E2E} before={before:g}")
+
+        prompt = (tc.validation.test_prompts or ["Through-EPP probe: what is 2+2?"])[0]
+        _log(f"Sending through-EPP probe via gateway: '{prompt[:50]}...'")
+        resp = client.chat(model=tc.model.name, prompt=prompt)
+        choices = resp.get("choices", [])
+        assert choices, "Through-EPP probe: no choices returned"
+        tokens = resp.get("usage", {}).get("total_tokens", 0)
+        assert tokens > 0, "Through-EPP probe: no tokens generated"
+
+        # Counter is usually updated before the HTTP response returns; retry in case
+        # kubectl scrape / port-forward is briefly stale on a busy API server.
+        check = probe_through_epp(
+            before,
+            lambda: scraper.scrape_epp(tc.name),
+            log_fn=_log,
+        )
+        _log(f"  {check.name}: {'PASS' if check.passed else 'FAIL'} — {check.message}")
+        assert check.passed, (
+            f"Through-EPP: gateway returned tokens but EPP {SCHED_E2E} did not increase "
+            f"({check.message}). Possible causes: traffic bypassing the endpoint picker "
+            f"(wrong GatewayClass, EPP at 0 replicas, non-gateway client); EPP metrics "
+            f"auth failure; or EPP version that does not increment this counter."
+        )
 
     def test_10_metrics_vllm(self, deployer: Deployer, scraper: Scraper, tc: TestCase, test_mode: str):
         """vLLM metrics should show successful requests."""
