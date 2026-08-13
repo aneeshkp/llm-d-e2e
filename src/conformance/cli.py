@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 
 DEFAULT_MOCK_IMAGE = "ghcr.io/llm-d/llm-d-inference-sim:latest"
-MANIFEST_REPO = "https://github.com/aneeshkp/llm-d-conformance-manifests.git"
+MANIFEST_REPO = "https://github.com/opendatahub-io/llm-d-conformance-manifests.git"
 
 
 def main():

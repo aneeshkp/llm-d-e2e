@@ -1,4 +1,4 @@
-MANIFEST_REPO ?= https://github.com/aneeshkp/llm-d-conformance-manifests.git
+MANIFEST_REPO ?= https://github.com/opendatahub-io/llm-d-conformance-manifests.git
 BRANCH        ?=
 MANIFEST_REF  ?= $(if $(BRANCH),$(BRANCH),main)
 MANIFEST_DIR  ?= deploy/manifests
