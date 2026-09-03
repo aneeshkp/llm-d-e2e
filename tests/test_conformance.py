@@ -13,6 +13,7 @@ config, when the manifest is missing, or when deploy failed / discover mode):
   08. Models — GET /v1/models lists base model (+ LoRA adapters if configured)
   09a. Inference — chat/completions (+ LoRA adapter inference if configured)
   09b. Messages/Responses — Anthropic /v1/messages + OpenAI /v1/responses
+  09c. Tool calling — chatPrompts with tools; validates tool_calls in response
   10. Metrics (vLLM) — scrape workload pods; validate_vllm_basic
   11. Metrics (cache) — prefix KV cache hits (vLLM + EPP; soft-fail in --mock)
   12. Metrics (P/D) — prefill/decode token distribution
@@ -227,6 +228,8 @@ class TestConformance:
 
         if tc.validation.chat_prompts:
             for entry in tc.validation.chat_prompts:
+                if isinstance(entry, dict) and entry.get("tools"):
+                    continue
                 messages = chat_prompt_to_messages(entry)
                 assert messages, f"chatPrompts entry has no 'system' or 'user' key: {entry}"
                 _log(f"Sending chat prompt ({len(messages)} message(s)): '{messages[-1]['content'][:50]}...'")
@@ -289,6 +292,38 @@ class TestConformance:
                 _log(f"/v1/responses response: '{output_text[:80]}...' ({tokens} tokens)")
                 assert output_text or tokens > 0, f"/v1/responses: empty response for prompt: {prompt}"
                 assert tokens > 0, f"/v1/responses: no output tokens for prompt: {prompt}"
+
+    def test_09c_tool_calling(self, client: LLMClient, tc: TestCase):
+        """Tool-calling: chatPrompts with tools should return structured tool_calls."""
+        if not tc.validation.inference_check:
+            pytest.skip("inference check disabled")
+        tool_entries = [e for e in (tc.validation.chat_prompts or []) if isinstance(e, dict) and e.get("tools")]
+        if not tool_entries:
+            pytest.skip("no tool-calling prompts configured")
+
+        for entry in tool_entries:
+            messages = chat_prompt_to_messages(entry)
+            tools = entry["tools"]
+            label = f"'{messages[-1]['content'][:50]}...'"
+            _log(f"Sending tool-call prompt ({len(tools)} tool(s)): {label}")
+
+            resp = client.chat(model=tc.model.name, prompt=messages, tools=tools, max_tokens=256)
+
+            choice = resp.get("choices", [{}])[0]
+            message = choice.get("message", {})
+            tool_calls = message.get("tool_calls")
+            finish = choice.get("finish_reason")
+            tokens = resp.get("usage", {}).get("total_tokens", 0)
+            assert tokens > 0, f"No tokens generated for {label}"
+            assert tool_calls, (
+                f"Expected tool_calls for {label} but got none "
+                f"(finish_reason={finish}, content={str(message.get('content', ''))[:80]})"
+            )
+            called_names = [tc_item["function"]["name"] for tc_item in tool_calls]
+            _log(f"Tool calls: {called_names} (finish_reason={finish})")
+            defined_names = {t["function"]["name"] for t in tools if t.get("type") == "function"}
+            for name in called_names:
+                assert name in defined_names, f"Model called unknown tool '{name}', defined: {defined_names}"
 
     def test_10_metrics_vllm(self, deployer: Deployer, scraper: Scraper, tc: TestCase, test_mode: str):
         """vLLM metrics should show successful requests."""

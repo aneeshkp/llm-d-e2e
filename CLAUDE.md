@@ -20,7 +20,7 @@ uv sync                                              # install dependencies
 uv run llm-d-e2e --setup main                        # clone test manifests (latest)
 uv run llm-d-e2e --setup 3.5-GA                      # clone manifests (specific branch)
 
-uv run pytest tests/test_smoke.py -v                  # unit tests (no cluster needed)
+uv run pytest tests/ -v --ignore=tests/test_conformance.py  # unit tests (no cluster needed)
 uv run ruff check src/ tests/                         # lint
 uv run ruff format src/ tests/                        # format
 
@@ -76,6 +76,7 @@ The `--mode` flag controls which phases execute:
 | 08 | `test_08_models` | GET /v1/models (direct pod, + LoRA adapters if configured) |
 | 09a | `test_09a_inference` | Chat completions + completions (+ LoRA adapter inference) |
 | 09b | `test_09b_messages_responses` | Anthropic /v1/messages + OpenAI /v1/responses |
+| 09c | `test_09c_tool_calling` | Tool-calling: chatPrompts with tools, validates tool_calls response |
 | 10 | `test_10_metrics_vllm` | Basic vLLM request success metrics |
 | 11 | `test_11_metrics_cache` | Prefix KV cache hit metrics |
 | 12 | `test_12_metrics_pd` | P/D token distribution + NIXL transfer metrics |
@@ -225,7 +226,7 @@ As of [odh-gitops PR#156](https://github.com/opendatahub-io/odh-gitops/pull/156)
 
 GitHub Actions (`.github/workflows/ci.yaml`) runs on push/PR to `main`:
 1. **lint-and-format** — `ruff check` + `ruff format --check`
-2. **smoke-tests** — clones manifests, runs `pytest tests/test_smoke.py`
+2. **smoke-tests** — clones manifests, runs unit tests (`pytest tests/ --ignore=tests/test_conformance.py`)
 
 No cluster integration tests run in CI.
 

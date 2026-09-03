@@ -330,6 +330,7 @@ test_07_health          — GET /health (direct pod)
 test_08_models          — GET /v1/models (direct pod)
 test_09a_inference      — POST /v1/chat/completions + /v1/completions (via gateway)
 test_09b_messages_responses — Anthropic /v1/messages + OpenAI /v1/responses
+test_09c_tool_calling   — tool-calling: validates tool_calls in response
 test_10_metrics_vllm    — vLLM request_success > 0
 test_11_metrics_cache   — prefix cache queries/hits
 test_12_metrics_pd      — P/D disaggregation metrics
@@ -342,7 +343,7 @@ test_99_cleanup         — delete LLMInferenceService
 
 ### How to add a new phase
 
-1. Pick a number between existing phases (e.g. `test_15` for a new metrics check after flow control).
+1. Pick a number between existing phases (e.g. `test_18` for a new phase after KV-cache checks).
 
 2. Add the method to `TestConformance` in `tests/test_conformance.py`:
 
