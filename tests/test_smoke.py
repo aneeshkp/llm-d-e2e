@@ -45,6 +45,74 @@ def test_load_testcase():
     assert tc.validation.test_prompts
 
 
+def test_manifest_model_and_lora_override_testcase(tmp_path):
+    from conformance.config import LoRAConfig
+    from conformance.deployer import Deployer
+
+    tc = load_testcase("configs/testcases/lora-single.yaml")
+    tc.model.name = "stale/model"
+    tc.model.uri = "hf://stale/model"
+    tc.model.lora = LoRAConfig(adapters=[{"name": "stale-adapter", "uri": "hf://stale/adapter"}])
+
+    manifest_path = tmp_path / "lora-single.yaml"
+    manifest_path.write_text(
+        """apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: lora-single
+spec:
+  model:
+    name: Qwen/Qwen3-0.6B
+    uri: hf://Qwen/Qwen3-0.6B
+    lora:
+      adapters:
+        - name: tldr-adapter
+          uri: hf://phh/Qwen3-0.6B-TLDR-Lora
+      maxRank: 16
+      maxAdapters: 1
+"""
+    )
+
+    patched = Deployer(manifest_dir=str(tmp_path))._patch_manifest(manifest_path, tc)
+
+    assert tc.model.name == "Qwen/Qwen3-0.6B"
+    assert tc.model.uri == "hf://Qwen/Qwen3-0.6B"
+    assert tc.model.lora is not None
+    assert tc.model.lora.adapters == [{"name": "tldr-adapter", "uri": "hf://phh/Qwen3-0.6B-TLDR-Lora"}]
+    assert tc.model.lora.max_rank == 16
+    assert tc.model.lora.max_adapters == 1
+    assert patched["spec"]["model"]["name"] == "Qwen/Qwen3-0.6B"
+    assert patched["spec"]["model"]["lora"]["adapters"][0]["name"] == "tldr-adapter"
+
+
+def test_cli_model_override_takes_precedence_over_manifest(tmp_path):
+    from conformance.config import load_testcase
+    from conformance.deployer import Deployer
+
+    manifest_path = tmp_path / "case.yaml"
+    manifest_path.write_text(
+        """apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: case
+spec:
+  model:
+    name: Qwen/Qwen3-0.6B
+    uri: hf://Qwen/Qwen3-0.6B
+"""
+    )
+    tc = load_testcase("configs/testcases/single-gpu-smoke.yaml")
+    tc.name = "case"
+    tc.deployment.manifest_path = "case.yaml"
+
+    deployer = Deployer(manifest_dir=str(tmp_path), model_override="served-alias")
+    patched = deployer._patch_manifest(manifest_path, tc)
+
+    assert patched["spec"]["model"]["name"] == "served-alias"
+    assert patched["spec"]["model"]["uri"] == "hf://Qwen/Qwen3-0.6B"
+    assert tc.model.name == "served-alias"
+
+
 def test_load_profile():
     profile = load_profile("configs/profiles/smoke.yaml")
     assert profile.name == "smoke"

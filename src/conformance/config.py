@@ -273,6 +273,39 @@ def _build(cls, data: dict | None):
     return cls(**kwargs)
 
 
+def apply_manifest_model_config(tc: TestCase, manifest_path: str | Path, model_name_override: str = "") -> None:
+    """Use model and LoRA values from the deployment manifest when present.
+
+    Testcase YAML owns validation behavior; the manifest owns the deployed
+    model identity and adapter URIs. Testcase values remain fallback metadata
+    when the manifest is unavailable or omits those fields.
+    """
+    manifest_path = Path(manifest_path)
+    if manifest_path.is_file():
+        with manifest_path.open() as f:
+            manifest = yaml.safe_load(f) or {}
+
+        model = (manifest.get("spec") or {}).get("model") or {}
+        if isinstance(model, dict):
+            if model.get("name") is not None:
+                tc.model.name = model["name"]
+            if model.get("uri") is not None:
+                tc.model.uri = model["uri"]
+            if "lora" in model:
+                lora = model["lora"]
+                if lora is None:
+                    tc.model.lora = None
+                elif isinstance(lora, dict):
+                    tc.model.lora = _build(LoRAConfig, lora)
+                else:
+                    raise ValueError(f"manifest {manifest_path}: spec.model.lora must be a mapping or null")
+
+    # The explicit CLI alias is the final override; it changes the served name,
+    # while the manifest remains the source of the model URI and LoRA artifacts.
+    if model_name_override:
+        tc.model.name = model_name_override
+
+
 def iter_config_yamls(directory: str | Path) -> list[Path]:
     """Return config YAML paths under *directory*, excluding docs like README.md.
 

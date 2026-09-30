@@ -36,7 +36,7 @@ from pathlib import Path
 
 import yaml
 
-from conformance.config import TestCase
+from conformance.config import TestCase, apply_manifest_model_config
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +82,7 @@ class Deployer:
         manifest_dir: str = "deploy/manifests",
         decode_node_selector: str = "",
         prefill_node_selector: str = "",
+        model_override: str = "",
     ):
         self.kubeconfig = kubeconfig
         self.platform = platform
@@ -94,6 +95,7 @@ class Deployer:
         self.manifest_dir = Path(manifest_dir)
         self.decode_node_selector = _parse_node_selector(decode_node_selector)
         self.prefill_node_selector = _parse_node_selector(prefill_node_selector)
+        self.model_override = model_override
         self._port_forward_proc: subprocess.Popen | None = None
         self._port_forward_port: int = 0
         self._pod_pf_proc: subprocess.Popen | None = None
@@ -932,6 +934,7 @@ class Deployer:
         with open(path) as f:
             manifest = yaml.safe_load(f)
 
+        apply_manifest_model_config(tc, path, model_name_override=self.model_override)
         manifest.setdefault("metadata", {})["name"] = tc.name
 
         spec = manifest.get("spec", {})

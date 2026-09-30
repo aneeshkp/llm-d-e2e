@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from conformance.config import (
     TestCase,
+    apply_manifest_model_config,
     filter_by_names,
     load_profile,
     load_testcases_from_dir,
@@ -85,14 +86,22 @@ def _resolve_test_cases(config) -> list[TestCase]:
 
     if profile_path:
         profile = load_profile(profile_path)
-        return resolve_profile(profile, testcase_dir)
+        cases = resolve_profile(profile, testcase_dir)
+    else:
+        cases = load_testcases_from_dir(testcase_dir)
+        if testcase_names:
+            names = [n.strip() for n in testcase_names.split(",")]
+            cases = filter_by_names(cases, names)
 
-    all_cases = load_testcases_from_dir(testcase_dir)
-    if testcase_names:
-        names = [n.strip() for n in testcase_names.split(",")]
-        return filter_by_names(all_cases, names)
-
-    return all_cases
+    manifest_dir = Path(config.rootpath) / "deploy" / "manifests"
+    model_override = config.getoption("--model")
+    for tc in cases:
+        apply_manifest_model_config(
+            tc,
+            manifest_dir / tc.deployment.manifest_path,
+            model_name_override=model_override,
+        )
+    return cases
 
 
 def pytest_generate_tests(metafunc):
@@ -109,6 +118,7 @@ def deployer(request) -> Deployer:
         namespace=request.config.getoption("--namespace"),
         model_source=request.config.getoption("--model-source"),
         mock_image=request.config.getoption("--mock"),
+        model_override=request.config.getoption("--model"),
         render_image=request.config.getoption("--render-image"),
         pull_secret=request.config.getoption("--pull-secret"),
         disable_auth=request.config.getoption("--disable-auth"),
