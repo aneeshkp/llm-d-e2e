@@ -1088,6 +1088,24 @@ def test_responses_prompt_sends_as_input(monkeypatch):
     c.close()
 
 
+def test_mock_manifest_uses_kserve_tls_certificate():
+    """Mock inference must present the KServe-mounted certificate to the gateway."""
+    from conformance.deployer import Deployer
+
+    spec = {
+        "template": {
+            "containers": [{"name": "main"}],
+        }
+    }
+
+    Deployer()._replace_vllm_image(spec, "simulator:latest", "test-model")
+
+    args = spec["template"]["containers"][0]["args"]
+    assert args[args.index("--ssl-certfile") + 1] == "/var/run/kserve/tls/tls.crt"
+    assert args[args.index("--ssl-keyfile") + 1] == "/var/run/kserve/tls/tls.key"
+    assert "--self-signed-certs" not in args
+
+
 def test_env_overrides_applied_to_decode_and_prefill():
     """_patch_manifest should inject env_overrides into main containers of both templates."""
     import yaml
