@@ -131,8 +131,23 @@ def deployer(request) -> Deployer:
         decode_node_selector=request.config.getoption("--decode-node-selector"),
         prefill_node_selector=request.config.getoption("--prefill-node-selector"),
     )
+    # The test namespace belongs to the suite: services left by a killed run hold
+    # GPUs that this run needs. --nocleanup keeps them for inspection.
+    no_cleanup = request.config.getoption("--nocleanup")
+    if request.config.getoption("--mode") == "deploy" and not no_cleanup:
+        for name in d.remove_stale_services():
+            print(f"Deleted stale LLMInferenceService '{name}' from a previous run")
     yield d
-    d.stop_port_forward()
+    _teardown_deployer(d, no_cleanup)
+
+
+def _teardown_deployer(deployer: Deployer, no_cleanup: bool) -> None:
+    """Stop port-forwards, then delete pending test cases even if stopping them fails."""
+    try:
+        deployer.stop_port_forward()
+    finally:
+        if not no_cleanup:
+            deployer.cleanup_pending()
 
 
 @pytest.fixture(scope="session")

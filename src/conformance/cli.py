@@ -172,7 +172,30 @@ def main():
 
     pytest_args.extend(["--tb", "short", "--timeout", "21600"])
 
-    sys.exit(subprocess.call(["python", "-m", "pytest"] + pytest_args))
+    sys.exit(_run_pytest(["python", "-m", "pytest"] + pytest_args))
+
+
+def _run_pytest(cmd: list[str]) -> int:
+    """Run pytest, letting it finish session teardown when interrupted.
+
+    Ctrl-C reaches pytest directly (same process group) and its teardown deletes
+    deployed services. ``subprocess.call`` would SIGKILL pytest 0.25s after Ctrl-C,
+    leaving those services holding GPUs. A second Ctrl-C force-quits.
+    """
+    proc = subprocess.Popen(cmd)
+    try:
+        return proc.wait()
+    except KeyboardInterrupt:
+        print(
+            "\nInterrupted: waiting for pytest to delete deployed resources (Ctrl-C again to force quit)...",
+            file=sys.stderr,
+        )
+        try:
+            return proc.wait()
+        except KeyboardInterrupt:
+            proc.kill()
+            proc.wait()
+            raise
 
 
 def _list_testcases(testcase_dir: str):

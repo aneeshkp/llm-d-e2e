@@ -306,7 +306,7 @@ def apply_manifest_model_config(tc: TestCase, manifest_path: str | Path, model_n
 
         if model_values and any(values != model_values[0] for values in model_values[1:]):
             raise ValueError(
-                f"manifest {manifest_path}: LLMInferenceService documents declare different spec.model values"
+                f"manifest {manifest_path}: LLMInferenceService documents declare different spec.model name/uri/lora"
             )
 
         if model_specs:

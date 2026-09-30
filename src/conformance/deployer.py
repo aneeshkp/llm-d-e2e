@@ -8,7 +8,7 @@ Deploy / patch:
   - Apply with retry for transient webhook / CRD-not-found errors
   - Manifest patching: model URI (hf→pvc), mock simulator image, LoRA
     adapters, pull secrets, ``--disable-auth``, env overrides, network
-    attach, P/D node selectors, render sidecar
+    attach, P/D node selectors, render sidecar, suite ownership label
   - Pull-secret propagation from operator namespaces; gateway
     ``allowedRoutes`` so the test namespace is accepted
   - EPP metrics RBAC (``ClusterRoleBinding``) for authenticated scrape
@@ -47,6 +47,10 @@ log = logging.getLogger(__name__)
 
 WORKLOAD_LABEL = "app.kubernetes.io/name={name},app.kubernetes.io/component=llminferenceservice-workload"
 PREFILL_LABEL = "app.kubernetes.io/name={name},app.kubernetes.io/component=llminferenceservice-workload-prefill"
+
+# Marks LLMInferenceServices this suite deployed, so the start-of-run sweep never
+# touches services it does not own.
+MANAGED_LABEL = "llm-d-e2e.opendatahub.io/managed"
 
 OPERATOR_NAMESPACES = ("redhat-ods-applications", "redhat-ods-operator", "rhaii")
 _IMAGE_PULL_FAILURE_REASONS = ("ImagePullBackOff", "ErrImagePull")
@@ -107,6 +111,7 @@ class Deployer:
         self._pod_pf_port: int = 0
         self._pod_pf_name: str = ""
         self._deployed: set[str] = set()
+        self._applied: dict[str, TestCase] = {}
         self._render_image_cached: str | None = None
         self._gpu_count: int | None = None
 
@@ -164,43 +169,55 @@ class Deployer:
         self._gpu_count = total
         return total
 
-    def _manifest_specs(self, tc: TestCase) -> list[dict]:
-        """All LLMInferenceService ``spec`` blocks in the manifest for this test case.
+    def _manifest_services(self, tc: TestCase) -> list[tuple[str | None, dict]]:
+        """``(service name, spec)`` for every LLMInferenceService in the manifest for this test case.
 
         The manifest is the single source of truth for replica and GPU counts —
         it is what KServe actually deploys — so the test never keeps its own copy.
         Supports multi-document manifests (e.g. multi-pool, which declares several
         LLMInferenceServices separated by ``---``); non-LLMISVC documents are ignored.
+        The primary (first) service is deployed under the testcase name.
         """
         manifest_path = self.manifest_dir / tc.deployment.manifest_path
-        return [
-            spec if isinstance(spec, dict) else {}
-            for spec in (doc.get("spec") for doc in llmisvc_manifest_documents(load_manifest_documents(manifest_path)))
-        ]
-
-    def manifest_service_names(self, tc: TestCase) -> list[str]:
-        """Service names from the manifest, with the primary service named for the testcase."""
-        manifest_path = self.manifest_dir / tc.deployment.manifest_path
-        documents = llmisvc_manifest_documents(load_manifest_documents(manifest_path))
-        names = []
-        for index, document in enumerate(documents):
+        services = []
+        for index, document in enumerate(llmisvc_manifest_documents(load_manifest_documents(manifest_path))):
             metadata = document.get("metadata")
             name = metadata.get("name") if isinstance(metadata, dict) else None
             if index == 0:
                 name = tc.name
-            if name:
-                names.append(name)
-        return names or [tc.name]
+            spec = document.get("spec")
+            services.append((name, spec if isinstance(spec, dict) else {}))
+        return services
 
-    def manifest_replicas(self, tc: TestCase) -> int:
+    def _manifest_specs(self, tc: TestCase) -> list[dict]:
+        """All LLMInferenceService ``spec`` blocks in the manifest for this test case."""
+        return [spec for _, spec in self._manifest_services(tc)]
+
+    def manifest_service_names(self, tc: TestCase) -> list[str]:
+        """Service names from the manifest, with the primary service named for the testcase."""
+        return [name for name, _ in self._manifest_services(tc) if name] or [tc.name]
+
+    def existing_service_names(self, tc: TestCase) -> list[str]:
+        """Manifest services present in the cluster, for validating an existing deployment.
+
+        The primary service is always included so a missing target still fails;
+        secondary services the target never deployed are left out.
+        """
+        primary, *secondary = self.manifest_service_names(tc)
+        return [primary, *(name for name in secondary if self.check_resource_exists("llminferenceservice", name))]
+
+    def manifest_replicas(self, tc: TestCase, service_names: list[str] | None = None) -> int:
         """Workload pods the manifest declares: decode (spec.replicas) + prefill,
-        summed across every LLMInferenceService document.
+        summed across every LLMInferenceService document, or only those in
+        *service_names* when given.
 
         This is the floor for the pod-count assertion; extra pods (EPP/scheduler)
         are absorbed by the caller's ``>=`` comparison.
         """
         total = 0
-        for spec in self._manifest_specs(tc):
+        for name, spec in self._manifest_services(tc):
+            if service_names is not None and name not in service_names:
+                continue
             total += int(spec.get("replicas", 1))
             prefill = spec.get("prefill")
             if prefill:
@@ -375,6 +392,54 @@ class Deployer:
     def is_deployed(self, name: str) -> bool:
         return name in self._deployed
 
+    def needs_cleanup(self, name: str) -> bool:
+        """True once ``kubectl apply`` was attempted for *name*, even if it failed.
+
+        A multi-document apply can create earlier LLMInferenceServices before a
+        later document is rejected, so a failed deploy may still leave resources.
+        """
+        return name in self._applied
+
+    def cleanup_pending(self) -> None:
+        """Delete every applied test case that phase 99 has not cleaned up yet.
+
+        Runs at session teardown so a run that stops early (Ctrl-C, ``-x``) does
+        not leave GPU-holding services behind. Honors ``tc.cleanup``.
+        """
+        for tc in list(self._applied.values()):
+            if not tc.cleanup:
+                continue
+            log.info("Cleaning up '%s' left deployed by an interrupted run", tc.name)
+            try:
+                self.cleanup(tc)
+            except Exception:
+                log.exception("Cleanup of '%s' failed", tc.name)
+
+    def remove_stale_services(self) -> list[str]:
+        """Delete suite-owned LLMInferenceServices left in the test namespace by an earlier run.
+
+        A run killed before cleanup (SIGKILL, closed terminal) leaves services that
+        keep holding GPUs, so later test cases in the next run stay Pending. Only
+        services carrying ``MANAGED_LABEL`` are selected; others in the namespace
+        belong to someone else.
+        """
+        output = self.kubectl(
+            "get",
+            "llminferenceservice",
+            "-n",
+            self.namespace,
+            "-l",
+            f"{MANAGED_LABEL}=true",
+            "-o",
+            "jsonpath={.items[*].metadata.name}",
+            check=False,
+        )
+        stale = output.split()
+        for name in stale:
+            log.warning("Deleting stale LLMInferenceService '%s' from a previous run", name)
+            self._ensure_clean_slate(name)
+        return stale
+
     def check_crd_exists(self, crd_name: str) -> bool:
         try:
             self.kubectl("get", "crd", crd_name)
@@ -495,14 +560,10 @@ class Deployer:
             result.error = f"Manifest not found: {manifest_path}"
             return result
 
-        manifest = self._patch_manifest(manifest_path, tc)
-        manifest_docs = manifest if isinstance(manifest, list) else [manifest]
+        manifest_docs = self._patch_manifest(manifest_path, tc)
         service_names = self.manifest_service_names(tc)
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            if isinstance(manifest, list):
-                yaml.dump_all(manifest, f)
-            else:
-                yaml.dump(manifest, f)
+            yaml.dump_all(manifest_docs, f)
             tmp_path = f.name
 
         try:
@@ -513,6 +574,7 @@ class Deployer:
                 if isinstance(manifest_doc, dict):
                     for secret_name in self._collect_pull_secrets(manifest_doc):
                         self.ensure_pull_secret(secret_name)
+            self._applied[tc.name] = tc
             self._apply_with_webhook_retry(tmp_path)
             for name in service_names:
                 self.ensure_metrics_rbac(name)
@@ -928,19 +990,30 @@ class Deployer:
         log.info("Cleaning up %s", tc.name)
         self._deployed.discard(tc.name)
         service_names = self.manifest_service_names(tc)
+        # Issue every delete even if one fails, so a persistently failing service
+        # cannot keep later services (and their GPUs) from ever being deleted.
+        errors: list[RuntimeError] = []
         for name in service_names:
             self.cleanup_metrics_rbac(name)
-            self.kubectl(
-                "delete",
-                "llminferenceservice",
-                name,
-                "-n",
-                self.namespace,
-                "--timeout",
-                f"{int(timeout)}s",
-                "--ignore-not-found",
-                check=False,
-            )
+            try:
+                self.kubectl(
+                    "delete",
+                    "llminferenceservice",
+                    name,
+                    "-n",
+                    self.namespace,
+                    "--timeout",
+                    f"{int(timeout)}s",
+                    "--ignore-not-found",
+                )
+            except RuntimeError as e:
+                errors.append(e)
+        if errors:
+            # The case stays pending, so session teardown retries the deletes.
+            raise errors[0]
+        # Only after every delete succeeded: an interrupt before this point also
+        # leaves the case pending for teardown.
+        self._applied.pop(tc.name, None)
         deadline = time.time() + timeout
         while time.time() < deadline:
             remaining_pods = []
@@ -970,7 +1043,7 @@ class Deployer:
             pass
         return info
 
-    def _patch_manifest(self, path: Path, tc: TestCase) -> dict | list[dict]:
+    def _patch_manifest(self, path: Path, tc: TestCase) -> list[dict]:
         manifest_docs = [doc for doc in load_manifest_documents(path) if doc is not None]
         llmisvc_docs = llmisvc_manifest_documents(manifest_docs)
         apply_manifest_model_config(tc, path, model_name_override=self.model_override)
@@ -982,6 +1055,11 @@ class Deployer:
                 manifest["metadata"] = metadata
             if index == 0:
                 metadata["name"] = tc.name
+            labels = metadata.get("labels")
+            if not isinstance(labels, dict):
+                labels = {}
+                metadata["labels"] = labels
+            labels[MANAGED_LABEL] = "true"
 
             spec = manifest.get("spec")
             if not isinstance(spec, dict):
@@ -1029,7 +1107,7 @@ class Deployer:
                         else:
                             env_list.append(entry)
 
-        return manifest_docs[0] if len(manifest_docs) == 1 else manifest_docs
+        return manifest_docs
 
     @staticmethod
     def _pod_templates(spec: dict) -> list[dict]:
