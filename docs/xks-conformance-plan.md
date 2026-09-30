@@ -212,7 +212,7 @@ Reuse `utilities/monitoring.py` for Prometheus scraping. Add llm-d specific vali
 | Basic | `vllm:request_success_total > 0` |
 | Cache-aware | `vllm:prefix_cache_queries > 0`, `vllm:prefix_cache_hits > 0`, hit rate > 0% |
 | P/D | `vllm:prompt_tokens_total > 0`, `vllm:generation_tokens_total > 0` |
-| Scheduler | `inference_extension_scheduler_e2e_duration_seconds_count > 0`, `inference_pool_ready_pods > 0` |
+| Scheduler | `llm_d_epp_scheduler_e2e_duration_seconds_count > 0`, `llm_d_epp_ready_endpoints > 0` |
 
 ### CI Pipeline
 

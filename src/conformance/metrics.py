@@ -59,20 +59,29 @@ VLLM_PROMPT_BY_SOURCE = "vllm:prompt_tokens_by_source_total"
 VLLM_DECODE_TIME = "vllm:request_decode_time_seconds_sum"
 
 # EPP / Scheduler metrics
-SCHED_E2E = "inference_extension_scheduler_e2e_duration_seconds_count"
-SCHED_REQUEST_TOTAL = "inference_objective_request_total"
-SCHED_REQUEST_ERROR = "inference_objective_request_error_total"
-POOL_READY_PODS = "inference_pool_ready_pods"
-PREFIX_INDEXER_SIZE = "inference_extension_prefix_indexer_size"
+# Current llm-d-router metrics use the llm_d_epp namespace. Keep the legacy
+# names for clusters that still expose the older Inference Extension series.
+SCHED_E2E = "llm_d_epp_scheduler_e2e_duration_seconds_count"
+SCHED_E2E_LEGACY = "inference_extension_scheduler_e2e_duration_seconds_count"
+SCHED_REQUEST_TOTAL = "llm_d_epp_request_total"
+SCHED_REQUEST_ERROR = "llm_d_epp_request_error_total"
+SCHED_REQUEST_ERROR_LEGACY = "inference_objective_request_error_total"
+READY_ENDPOINTS = "llm_d_epp_ready_endpoints"
+READY_ENDPOINTS_LEGACY = "inference_pool_ready_pods"
+PREFIX_INDEXER_SIZE = "llm_d_epp_prefix_indexer_size"
 
 # LoRA metrics (vLLM reports adapter state via lora_requests_info)
 VLLM_LORA_REQUESTS_INFO = "vllm:lora_requests_info"
 
 # Flow Control metrics
-FC_DISPATCH_CYCLE = "inference_extension_flow_control_dispatch_cycle_duration_seconds_count"
-FC_POOL_SATURATION = "inference_extension_flow_control_pool_saturation"
-FC_REQUEST_ENQUEUE = "inference_extension_flow_control_request_enqueue_duration_seconds_count"
-FC_QUEUE_DURATION = "inference_extension_flow_control_request_queue_duration_seconds_count"
+FC_DISPATCH_CYCLE = "llm_d_epp_flow_control_dispatch_cycle_duration_seconds_count"
+FC_DISPATCH_CYCLE_LEGACY = "inference_extension_flow_control_dispatch_cycle_duration_seconds_count"
+FC_POOL_SATURATION = "llm_d_epp_flow_control_pool_saturation"
+FC_POOL_SATURATION_LEGACY = "inference_extension_flow_control_pool_saturation"
+FC_REQUEST_ENQUEUE = "llm_d_epp_flow_control_request_enqueue_duration_seconds_count"
+FC_REQUEST_ENQUEUE_LEGACY = "inference_extension_flow_control_request_enqueue_duration_seconds_count"
+FC_QUEUE_DURATION = "llm_d_epp_flow_control_request_queue_duration_seconds_count"
+FC_QUEUE_DURATION_LEGACY = "inference_extension_flow_control_request_queue_duration_seconds_count"
 
 
 # KV-cache offloading metrics (vLLM native offloading KV connector).
@@ -494,7 +503,7 @@ def validate_pd(decode: list[ScrapeResult], prefill: list[ScrapeResult]) -> list
 def validate_scheduler(epp: list[ScrapeResult]) -> list[CheckResult]:
     checks = []
     for r in epp:
-        e2e = r.get(SCHED_E2E)
+        e2e = r.get(SCHED_E2E, SCHED_E2E_LEGACY)
         checks.append(
             CheckResult(
                 name="scheduler_e2e",
@@ -505,7 +514,7 @@ def validate_scheduler(epp: list[ScrapeResult]) -> list[CheckResult]:
                 message=f"scheduler_e2e_count={e2e}",
             )
         )
-        errors = r.get(SCHED_REQUEST_ERROR)
+        errors = r.get(SCHED_REQUEST_ERROR, SCHED_REQUEST_ERROR_LEGACY)
         if errors is not None:
             checks.append(
                 CheckResult(
@@ -517,16 +526,16 @@ def validate_scheduler(epp: list[ScrapeResult]) -> list[CheckResult]:
                     message=f"request_errors={errors}",
                 )
             )
-        pods = r.get(POOL_READY_PODS)
-        if pods is not None:
+        endpoints = r.get(READY_ENDPOINTS, READY_ENDPOINTS_LEGACY)
+        if endpoints is not None:
             checks.append(
                 CheckResult(
-                    name="ready_pods",
-                    metric=POOL_READY_PODS,
+                    name="ready_endpoints",
+                    metric=READY_ENDPOINTS,
                     source=r.source,
-                    value=pods,
-                    passed=pods > 0,
-                    message=f"ready_pods={pods}",
+                    value=endpoints,
+                    passed=endpoints > 0,
+                    message=f"ready_endpoints={endpoints}",
                 )
             )
     return checks
@@ -536,7 +545,7 @@ def validate_flow_control(epp: list[ScrapeResult]) -> list[CheckResult]:
     """Validate flow control metrics from EPP pods."""
     checks = []
     for r in epp:
-        dispatch = r.get(FC_DISPATCH_CYCLE)
+        dispatch = r.get(FC_DISPATCH_CYCLE, FC_DISPATCH_CYCLE_LEGACY)
         checks.append(
             CheckResult(
                 name="fc_dispatch_cycle",
@@ -547,7 +556,7 @@ def validate_flow_control(epp: list[ScrapeResult]) -> list[CheckResult]:
                 message=f"dispatch_cycle_count={dispatch}",
             )
         )
-        saturation = r.get(FC_POOL_SATURATION)
+        saturation = r.get(FC_POOL_SATURATION, FC_POOL_SATURATION_LEGACY)
         checks.append(
             CheckResult(
                 name="fc_pool_saturation",
@@ -558,7 +567,7 @@ def validate_flow_control(epp: list[ScrapeResult]) -> list[CheckResult]:
                 message=f"pool_saturation={saturation}",
             )
         )
-        enqueue = r.get(FC_REQUEST_ENQUEUE)
+        enqueue = r.get(FC_REQUEST_ENQUEUE, FC_REQUEST_ENQUEUE_LEGACY)
         checks.append(
             CheckResult(
                 name="fc_request_enqueue",
@@ -569,7 +578,7 @@ def validate_flow_control(epp: list[ScrapeResult]) -> list[CheckResult]:
                 message=f"request_enqueue_count={enqueue}",
             )
         )
-        dispatched = r.get(FC_QUEUE_DURATION)
+        dispatched = r.get(FC_QUEUE_DURATION, FC_QUEUE_DURATION_LEGACY)
         checks.append(
             CheckResult(
                 name="fc_request_dispatched",
