@@ -152,17 +152,19 @@ class TestConformance:
         _require_deployed(deployer, tc, test_mode)
         timeout = tc.deployment.ready_timeout.total_seconds()
         _log(f"Waiting for pods to be Running (timeout: {timeout:.0f}s)")
-        pods = deployer.wait_for_pods(tc.name, timeout=timeout, print_fn=_log)
-        _log(f"All pods running: {', '.join(pods)}")
         expected = deployer.manifest_replicas(tc)
+        service_names = deployer.manifest_service_names(tc)
+        pods = deployer.wait_for_pods(service_names, timeout=timeout, print_fn=_log, min_pods=expected)
+        _log(f"All pods running: {', '.join(pods)}")
         assert len(pods) >= expected, f"Expected {expected} pods, got {len(pods)}"
 
     def test_06_ready(self, deployer: Deployer, tc: TestCase, test_mode: str):
         """LLMInferenceService should become Ready."""
         _require_deployed(deployer, tc, test_mode)
-        _log(f"Waiting for '{tc.name}' Ready=True")
-        deployer.wait_for_ready(tc, print_fn=_log)
-        _log(f"'{tc.name}' is Ready")
+        for service_name in deployer.manifest_service_names(tc):
+            _log(f"Waiting for '{service_name}' Ready=True")
+            deployer.wait_for_ready(tc, print_fn=_log, service_name=service_name)
+            _log(f"'{service_name}' is Ready")
 
     def test_07_health(self, pod_client: LLMClient, tc: TestCase, pod_endpoint: str):
         """Health endpoint should return 200 (direct pod access, bypasses gateway EPP)."""

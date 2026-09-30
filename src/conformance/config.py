@@ -24,6 +24,7 @@ select which cases run. Directory loaders use ``iter_config_yamls`` (``.yaml`` /
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -273,6 +274,17 @@ def _build(cls, data: dict | None):
     return cls(**kwargs)
 
 
+def load_manifest_documents(manifest_path: str | Path) -> list:
+    """Load every YAML document from a deployment manifest."""
+    with Path(manifest_path).open() as f:
+        return list(yaml.safe_load_all(f))
+
+
+def llmisvc_manifest_documents(documents: Iterable[object]) -> list[dict]:
+    """Keep only mapping documents that declare an LLMInferenceService."""
+    return [doc for doc in documents if isinstance(doc, dict) and doc.get("kind") == "LLMInferenceService"]
+
+
 def apply_manifest_model_config(tc: TestCase, manifest_path: str | Path, model_name_override: str = "") -> None:
     """Use model and LoRA values from the deployment manifest when present.
 
@@ -282,11 +294,23 @@ def apply_manifest_model_config(tc: TestCase, manifest_path: str | Path, model_n
     """
     manifest_path = Path(manifest_path)
     if manifest_path.is_file():
-        with manifest_path.open() as f:
-            manifest = yaml.safe_load(f) or {}
+        docs = llmisvc_manifest_documents(load_manifest_documents(manifest_path))
+        model_values = []
+        model_specs = []
+        for doc in docs:
+            spec = doc.get("spec")
+            model = spec.get("model") if isinstance(spec, dict) else None
+            model = model if isinstance(model, dict) else {}
+            model_specs.append(model)
+            model_values.append({key: model[key] for key in ("name", "uri", "lora") if key in model})
 
-        model = (manifest.get("spec") or {}).get("model") or {}
-        if isinstance(model, dict):
+        if model_values and any(values != model_values[0] for values in model_values[1:]):
+            raise ValueError(
+                f"manifest {manifest_path}: LLMInferenceService documents declare different spec.model values"
+            )
+
+        if model_specs:
+            model = model_specs[0]
             if model.get("name") is not None:
                 tc.model.name = model["name"]
             if model.get("uri") is not None:

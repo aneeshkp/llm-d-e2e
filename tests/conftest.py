@@ -95,6 +95,12 @@ def _resolve_test_cases(config) -> list[TestCase]:
 
     manifest_dir = Path(config.rootpath) / "deploy" / "manifests"
     model_override = config.getoption("--model")
+    if config.getoption("--mode") == "discover":
+        if model_override:
+            for tc in cases:
+                tc.model.name = model_override
+        return cases
+
     for tc in cases:
         apply_manifest_model_config(
             tc,

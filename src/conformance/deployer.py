@@ -36,7 +36,12 @@ from pathlib import Path
 
 import yaml
 
-from conformance.config import TestCase, apply_manifest_model_config
+from conformance.config import (
+    TestCase,
+    apply_manifest_model_config,
+    llmisvc_manifest_documents,
+    load_manifest_documents,
+)
 
 log = logging.getLogger(__name__)
 
@@ -169,10 +174,23 @@ class Deployer:
         """
         manifest_path = self.manifest_dir / tc.deployment.manifest_path
         return [
-            doc.get("spec", {}) or {}
-            for doc in yaml.safe_load_all(manifest_path.read_text())
-            if doc and doc.get("kind") == "LLMInferenceService"
+            spec if isinstance(spec, dict) else {}
+            for spec in (doc.get("spec") for doc in llmisvc_manifest_documents(load_manifest_documents(manifest_path)))
         ]
+
+    def manifest_service_names(self, tc: TestCase) -> list[str]:
+        """Service names from the manifest, with the primary service named for the testcase."""
+        manifest_path = self.manifest_dir / tc.deployment.manifest_path
+        documents = llmisvc_manifest_documents(load_manifest_documents(manifest_path))
+        names = []
+        for index, document in enumerate(documents):
+            metadata = document.get("metadata")
+            name = metadata.get("name") if isinstance(metadata, dict) else None
+            if index == 0:
+                name = tc.name
+            if name:
+                names.append(name)
+        return names or [tc.name]
 
     def manifest_replicas(self, tc: TestCase) -> int:
         """Workload pods the manifest declares: decode (spec.replicas) + prefill,
@@ -306,6 +324,8 @@ class Deployer:
         """Extract all imagePullSecret names referenced in a manifest."""
         names = set()
         spec = manifest.get("spec", {})
+        if not isinstance(spec, dict):
+            return []
         for section_key in ("template", "prefill", "router"):
             section = spec.get(section_key, {})
             if isinstance(section, dict):
@@ -476,17 +496,26 @@ class Deployer:
             return result
 
         manifest = self._patch_manifest(manifest_path, tc)
+        manifest_docs = manifest if isinstance(manifest, list) else [manifest]
+        service_names = self.manifest_service_names(tc)
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            yaml.dump(manifest, f)
+            if isinstance(manifest, list):
+                yaml.dump_all(manifest, f)
+            else:
+                yaml.dump(manifest, f)
             tmp_path = f.name
 
         try:
             self.ensure_namespace()
-            self._ensure_clean_slate(tc.name)
-            for secret_name in self._collect_pull_secrets(manifest):
-                self.ensure_pull_secret(secret_name)
+            for name in service_names:
+                self._ensure_clean_slate(name)
+            for manifest_doc in manifest_docs:
+                if isinstance(manifest_doc, dict):
+                    for secret_name in self._collect_pull_secrets(manifest_doc):
+                        self.ensure_pull_secret(secret_name)
             self._apply_with_webhook_retry(tmp_path)
-            self.ensure_metrics_rbac(tc.name)
+            for name in service_names:
+                self.ensure_metrics_rbac(name)
             result.success = True
             self._deployed.add(tc.name)
         except RuntimeError as e:
@@ -497,11 +526,13 @@ class Deployer:
 
         return result
 
-    def wait_for_ready(self, tc: TestCase, timeout: float | None = None, print_fn=None) -> bool:
+    def wait_for_ready(
+        self, tc: TestCase, timeout: float | None = None, print_fn=None, service_name: str | None = None
+    ) -> bool:
         if timeout is None:
             timeout = tc.deployment.ready_timeout.total_seconds()
         deadline = time.time() + timeout
-        name = tc.name
+        name = service_name or tc.name
         start = time.time()
         crashloop_count = 0
         # Track any persistent Ready=False condition with a stable reason+message
@@ -707,26 +738,30 @@ class Deployer:
             time.sleep(10)
         raise TimeoutError(f"Gateway not programmed after {timeout}s")
 
-    def wait_for_pods(self, name: str, timeout: float = 600, print_fn=None) -> list[str]:
-        label = f"app.kubernetes.io/name={name}"
+    def wait_for_pods(self, name: str | list[str], timeout: float = 600, print_fn=None, min_pods: int = 1) -> list[str]:
+        names = [name] if isinstance(name, str) else name
+        display_name = ", ".join(names)
         deadline = time.time() + timeout
         start = time.time()
         crashloop_count = 0
         while time.time() < deadline:
             elapsed = int(time.time() - start)
             try:
-                output = self.kubectl(
-                    "get",
-                    "pods",
-                    "-n",
-                    self.namespace,
-                    "-l",
-                    label,
-                    "-o",
-                    "jsonpath={range .items[*]}{.metadata.name}={.status.phase} {end}",
-                    check=False,
-                )
-                pod_statuses = output.strip().split() if output.strip() else []
+                pod_statuses = []
+                for service_name in names:
+                    for label in (WORKLOAD_LABEL, PREFILL_LABEL):
+                        output = self.kubectl(
+                            "get",
+                            "pods",
+                            "-n",
+                            self.namespace,
+                            "-l",
+                            label.format(name=service_name),
+                            "-o",
+                            "jsonpath={range .items[*]}{.metadata.name}={.status.phase} {end}",
+                            check=False,
+                        )
+                        pod_statuses.extend(output.strip().split() if output.strip() else [])
                 if print_fn and pod_statuses:
                     print_fn(f"[{elapsed}s/{int(timeout)}s] pods: {', '.join(pod_statuses)}")
                 elif print_fn:
@@ -740,16 +775,16 @@ class Deployer:
                         pods.append(parts[0])
                         if parts[1] != "Running":
                             all_running = False
-                if pods and all_running:
+                if len(pods) >= min_pods and all_running:
                     return pods
 
-                crash_pods = self._check_crashloop(name)
+                crash_pods = [pod for service_name in names for pod in self._check_crashloop(service_name)]
                 if crash_pods:
                     crashloop_count += 1
                     if print_fn:
                         print_fn(f"CrashLoopBackOff detected: {', '.join(crash_pods)}")
                     if crashloop_count >= 3:
-                        raise RuntimeError(f"Pods in CrashLoopBackOff for {name}: {', '.join(crash_pods)}")
+                        raise RuntimeError(f"Pods in CrashLoopBackOff for {display_name}: {', '.join(crash_pods)}")
                 else:
                     crashloop_count = 0
             except RuntimeError:
@@ -758,7 +793,7 @@ class Deployer:
                 if print_fn:
                     print_fn(f"[{elapsed}s/{int(timeout)}s] waiting for pods...")
             time.sleep(15)
-        raise TimeoutError(f"Pods for {name} not running after {timeout}s")
+        raise TimeoutError(f"Pods for {display_name} not running after {timeout}s")
 
     def wait_for_inference_pool(self, name: str, timeout: float = 300) -> bool:
         deadline = time.time() + timeout
@@ -892,33 +927,38 @@ class Deployer:
     def cleanup(self, tc: TestCase, timeout: float = 120):
         log.info("Cleaning up %s", tc.name)
         self._deployed.discard(tc.name)
-        self.cleanup_metrics_rbac(tc.name)
-        self.kubectl(
-            "delete",
-            "llminferenceservice",
-            tc.name,
-            "-n",
-            self.namespace,
-            "--timeout",
-            f"{int(timeout)}s",
-            "--ignore-not-found",
-            check=False,
-        )
-        deadline = time.time() + timeout
-        label = f"app.kubernetes.io/name={tc.name}"
-        while time.time() < deadline:
-            output = self.kubectl(
-                "get",
-                "pods",
+        service_names = self.manifest_service_names(tc)
+        for name in service_names:
+            self.cleanup_metrics_rbac(name)
+            self.kubectl(
+                "delete",
+                "llminferenceservice",
+                name,
                 "-n",
                 self.namespace,
-                "-l",
-                label,
-                "-o",
-                "jsonpath={.items[*].metadata.name}",
+                "--timeout",
+                f"{int(timeout)}s",
+                "--ignore-not-found",
                 check=False,
             )
-            if not output.strip():
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            remaining_pods = []
+            for name in service_names:
+                output = self.kubectl(
+                    "get",
+                    "pods",
+                    "-n",
+                    self.namespace,
+                    "-l",
+                    f"app.kubernetes.io/name={name}",
+                    "-o",
+                    "jsonpath={.items[*].metadata.name}",
+                    check=False,
+                )
+                if output.strip():
+                    remaining_pods.extend(output.split())
+            if not remaining_pods:
                 return
             time.sleep(5)
 
@@ -930,54 +970,66 @@ class Deployer:
             pass
         return info
 
-    def _patch_manifest(self, path: Path, tc: TestCase) -> dict:
-        with open(path) as f:
-            manifest = yaml.safe_load(f)
-
+    def _patch_manifest(self, path: Path, tc: TestCase) -> dict | list[dict]:
+        manifest_docs = [doc for doc in load_manifest_documents(path) if doc is not None]
+        llmisvc_docs = llmisvc_manifest_documents(manifest_docs)
         apply_manifest_model_config(tc, path, model_name_override=self.model_override)
-        manifest.setdefault("metadata", {})["name"] = tc.name
 
-        spec = manifest.get("spec", {})
+        for index, manifest in enumerate(llmisvc_docs):
+            metadata = manifest.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+                manifest["metadata"] = metadata
+            if index == 0:
+                metadata["name"] = tc.name
 
-        if self.mock_image:
-            model = spec.setdefault("model", {})
-            model["name"] = tc.model.name
-            model["uri"] = tc.model.uri
-            self._inject_lora_spec(model, tc.model.lora)
-            self._replace_vllm_image(spec, self.mock_image, tc.model.name, lora=tc.model.lora)
-        elif tc.model.uri:
-            model = spec.setdefault("model", {})
-            model["uri"] = tc.model.uri
-            model["name"] = tc.model.name
-            self._inject_lora_spec(model, tc.model.lora)
+            spec = manifest.get("spec")
+            if not isinstance(spec, dict):
+                spec = {}
+                manifest["spec"] = spec
 
-        if self.pull_secret:
-            self._inject_pull_secret(spec, self.pull_secret)
+            model = spec.get("model")
+            if not isinstance(model, dict):
+                model = {}
+                spec["model"] = model
 
-        if self.disable_auth:
-            annotations = manifest.setdefault("metadata", {}).setdefault("annotations", {})
-            annotations["serving.kserve.io/disable-auth"] = "true"
+            if self.mock_image:
+                model["name"] = tc.model.name
+                model["uri"] = tc.model.uri
+                self._inject_lora_spec(model, tc.model.lora)
+                self._replace_vllm_image(spec, self.mock_image, tc.model.name, lora=tc.model.lora)
+            elif tc.model.uri:
+                model["uri"] = tc.model.uri
+                model["name"] = tc.model.name
+                self._inject_lora_spec(model, tc.model.lora)
 
-        if self.decode_node_selector:
-            spec.setdefault("template", {})["nodeSelector"] = self.decode_node_selector
+            if self.pull_secret:
+                self._inject_pull_secret(spec, self.pull_secret)
 
-        if self.prefill_node_selector:
-            prefill = spec.get("prefill", {})
-            if prefill:
-                prefill.setdefault("template", {})["nodeSelector"] = self.prefill_node_selector
+            if self.disable_auth:
+                annotations = metadata.setdefault("annotations", {})
+                annotations["serving.kserve.io/disable-auth"] = "true"
 
-        if tc.deployment.env_overrides:
-            for container in self._main_containers(spec):
-                env_list = container.setdefault("env", [])
-                existing = {e.get("name"): i for i, e in enumerate(env_list) if e.get("name")}
-                for k, v in tc.deployment.env_overrides.items():
-                    entry = {"name": k, "value": v}
-                    if k in existing:
-                        env_list[existing[k]] = entry
-                    else:
-                        env_list.append(entry)
+            if self.decode_node_selector:
+                spec.setdefault("template", {})["nodeSelector"] = self.decode_node_selector
 
-        return manifest
+            if self.prefill_node_selector:
+                prefill = spec.get("prefill", {})
+                if prefill:
+                    prefill.setdefault("template", {})["nodeSelector"] = self.prefill_node_selector
+
+            if tc.deployment.env_overrides:
+                for container in self._main_containers(spec):
+                    env_list = container.setdefault("env", [])
+                    existing = {e.get("name"): i for i, e in enumerate(env_list) if e.get("name")}
+                    for k, v in tc.deployment.env_overrides.items():
+                        entry = {"name": k, "value": v}
+                        if k in existing:
+                            env_list[existing[k]] = entry
+                        else:
+                            env_list.append(entry)
+
+        return manifest_docs[0] if len(manifest_docs) == 1 else manifest_docs
 
     @staticmethod
     def _pod_templates(spec: dict) -> list[dict]:
