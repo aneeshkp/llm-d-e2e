@@ -52,7 +52,6 @@ validation:
     checkVLLM: true
     checkScheduler: true
     # Uncomment as needed:
-    # checkEPP: true
     # checkPrefixCache: true
     # checkFlowControl: true
     # checkPD: true

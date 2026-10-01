@@ -87,7 +87,6 @@ class PrefillConfig:
 class MetricsCheck:
     enabled: bool = False
     check_vllm: bool = False
-    check_epp: bool = False
     check_prefix_cache: bool = False
     check_pd: bool = False
     check_scheduler: bool = False

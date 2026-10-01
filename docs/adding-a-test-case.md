@@ -138,7 +138,6 @@ validation:
   metricsCheck:
     enabled: true
     checkVLLM: true          # test_10: vllm:request_success_total > 0
-    checkEPP: true           # scrape EPP pods (needed by other checks)
     checkPrefixCache: true   # test_11: prefix_queries > 0, hit rate
     checkScheduler: true     # test_13: scheduler_e2e_count > 0, ready_pods > 0
     checkFlowControl: true   # test_14: dispatch_cycle_count > 0
@@ -501,7 +500,6 @@ Each flag controls a specific conformance phase and validates different Promethe
 | Flag | Phase | What it validates | When to enable |
 |---|---|---|---|
 | `checkVLLM` | `test_10` | `vllm:request_success_total > 0` | Always (basic sanity) |
-| `checkEPP` | — | Enables EPP pod scraping (required by other checks) | When using any EPP-level check |
 | `checkPrefixCache` | `test_11` | `vllm:prefix_cache_queries` or `vllm:prefix_cache_queries_total` > 0, `vllm:prefix_cache_hits` or `vllm:prefix_cache_hits_total` > 0, hit rate > 0% | Cache-aware routing with `precise-prefix-cache-producer` + `prefix-cache-scorer` |
 | `checkScheduler` | `test_13` | `llm_d_epp_scheduler_e2e_duration_seconds_count` (fallback `inference_extension_scheduler_e2e_duration_seconds_count`) > 0, `llm_d_epp_ready_endpoints` (fallback `inference_pool_ready_pods`) > 0 | Any topology with an EPP/scheduler |
 | `checkFlowControl` | `test_14` | `llm_d_epp_flow_control_dispatch_cycle_duration_seconds_count` (fallback `inference_extension_flow_control_dispatch_cycle_duration_seconds_count`) > 0, `llm_d_epp_flow_control_request_enqueue_duration_seconds_count` (fallback `inference_extension_flow_control_request_enqueue_duration_seconds_count`) > 0 | Flow control with `flowControl.saturationDetector` |
@@ -511,9 +509,9 @@ Each flag controls a specific conformance phase and validates different Promethe
 **Pick based on your deployment topology:**
 
 - Basic single-GPU: `checkVLLM` + `checkScheduler`
-- Cache-aware routing: add `checkEPP` + `checkPrefixCache`
-- Flow control: add `checkEPP` + `checkFlowControl`
-- P/D disaggregation: add `checkEPP` + `checkPD`
+- Cache-aware routing: add `checkPrefixCache`
+- Flow control: add `checkFlowControl`
+- P/D disaggregation: add `checkPD`
 - Combination (e.g. cache-aware + flow control): enable all relevant flags
 
 **To add a new metrics check** (full example: adding NIXL KV transfer validation):
@@ -527,7 +525,6 @@ You need to touch 4 files. Here's every step with the actual code.
 class MetricsCheck:
     enabled: bool = False
     check_vllm: bool = False
-    check_epp: bool = False
     check_prefix_cache: bool = False
     check_pd: bool = False
     check_scheduler: bool = False
