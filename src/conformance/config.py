@@ -193,6 +193,7 @@ class ValidateConfig:
     test_prompts: list[str] = field(default_factory=list)
     # Send each prompt this many times (unique prefix per iteration) to build KV load.
     inference_repeat: int = 1
+    tool_call_max_tokens: int = 256
     chat_prompts: list[ChatPrompt] = field(default_factory=list)
     expected_codes: list[int] = field(default_factory=lambda: [200])
     timeout: timedelta = field(default_factory=lambda: timedelta(minutes=2))
