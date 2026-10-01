@@ -45,6 +45,606 @@ def test_load_testcase():
     assert tc.validation.test_prompts
 
 
+def test_manifest_model_and_lora_override_testcase(tmp_path):
+    from conformance.config import LoRAConfig
+    from conformance.deployer import Deployer
+
+    tc = load_testcase("configs/testcases/lora-single.yaml")
+    tc.model.name = "stale/model"
+    tc.model.uri = "hf://stale/model"
+    tc.model.lora = LoRAConfig(adapters=[{"name": "stale-adapter", "uri": "hf://stale/adapter"}])
+
+    manifest_path = tmp_path / "lora-single.yaml"
+    manifest_path.write_text(
+        """apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: lora-single
+spec:
+  model:
+    name: Qwen/Qwen3-0.6B
+    uri: hf://Qwen/Qwen3-0.6B
+    lora:
+      adapters:
+        - name: tldr-adapter
+          uri: hf://phh/Qwen3-0.6B-TLDR-Lora
+      maxRank: 16
+      maxAdapters: 1
+"""
+    )
+
+    patched = Deployer(manifest_dir=str(tmp_path))._patch_manifest(manifest_path, tc)
+
+    assert tc.model.name == "Qwen/Qwen3-0.6B"
+    assert tc.model.uri == "hf://Qwen/Qwen3-0.6B"
+    assert tc.model.lora is not None
+    assert tc.model.lora.adapters == [{"name": "tldr-adapter", "uri": "hf://phh/Qwen3-0.6B-TLDR-Lora"}]
+    assert tc.model.lora.max_rank == 16
+    assert tc.model.lora.max_adapters == 1
+    assert patched[0]["spec"]["model"]["name"] == "Qwen/Qwen3-0.6B"
+    assert patched[0]["spec"]["model"]["lora"]["adapters"][0]["name"] == "tldr-adapter"
+
+
+def test_multi_document_manifest_model_is_applied(tmp_path):
+    from conformance.config import apply_manifest_model_config
+    from conformance.deployer import MANAGED_LABEL, Deployer
+
+    tc = load_testcase("configs/testcases/lora-single.yaml")
+    tc.model.name = "stale/model"
+    tc.model.uri = "hf://stale/model"
+    tc.model.lora = None
+    manifest_path = tmp_path / "multi.yaml"
+    model = """name: Qwen/Qwen3-0.6B
+uri: hf://Qwen/Qwen3-0.6B
+lora:
+  adapters:
+    - name: tldr-adapter
+      uri: hf://phh/Qwen3-0.6B-TLDR-Lora
+  maxRank: 16
+  maxAdapters: 1
+"""
+    manifest_path.write_text(
+        """apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: lora-single-a
+spec:
+  model:
+"""
+        + "".join("    " + line for line in model.splitlines(keepends=True))
+        + "---\n"
+        + """apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unrelated
+data:
+  note: ignored
+---
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: lora-single-b
+spec:
+  model:
+"""
+        + "".join("    " + line for line in model.splitlines(keepends=True))
+    )
+
+    apply_manifest_model_config(tc, manifest_path)
+
+    assert tc.model.name == "Qwen/Qwen3-0.6B"
+    assert tc.model.uri == "hf://Qwen/Qwen3-0.6B"
+    assert tc.model.lora is not None
+    assert tc.model.lora.adapters == [{"name": "tldr-adapter", "uri": "hf://phh/Qwen3-0.6B-TLDR-Lora"}]
+    assert tc.model.lora.max_rank == 16
+    assert tc.model.lora.max_adapters == 1
+
+    patched = Deployer(manifest_dir=str(tmp_path))._patch_manifest(manifest_path, tc)
+    assert [doc["kind"] for doc in patched] == ["LLMInferenceService", "ConfigMap", "LLMInferenceService"]
+    assert [doc["metadata"]["name"] for doc in (patched[0], patched[2])] == ["lora-single", "lora-single-b"]
+    assert all(doc["spec"]["model"]["name"] == "Qwen/Qwen3-0.6B" for doc in (patched[0], patched[2]))
+    # Every deployed service carries the ownership label the start-of-run sweep selects on.
+    assert all(doc["metadata"]["labels"][MANAGED_LABEL] == "true" for doc in (patched[0], patched[2]))
+    assert "labels" not in patched[1]["metadata"]
+
+
+def test_manifest_service_names_keep_all_documents_and_use_testcase_name_for_primary(tmp_path):
+    from conformance.deployer import Deployer
+
+    manifest_path = tmp_path / "multi.yaml"
+    manifest_path.write_text(
+        """apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: service-a
+spec: {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unrelated
+---
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: service-b
+spec: {}
+"""
+    )
+    tc = load_testcase("configs/testcases/lora-single.yaml")
+    tc.name = "case"
+    tc.deployment.manifest_path = "multi.yaml"
+
+    deployer = Deployer(manifest_dir=str(tmp_path))
+
+    assert deployer.manifest_service_names(tc) == ["case", "service-b"]
+
+
+def test_discover_mode_validates_only_services_the_target_deployed(tmp_path, monkeypatch):
+    """An existing target without a secondary pool must not wait on that pool or count its replicas."""
+    from conformance.deployer import Deployer
+
+    (tmp_path / "multi.yaml").write_text(
+        """apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: service-a
+spec:
+  replicas: 2
+---
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: service-b
+spec:
+  replicas: 3
+"""
+    )
+    tc = load_testcase("configs/testcases/single-gpu-smoke.yaml")
+    tc.name = "case"
+    tc.deployment.manifest_path = "multi.yaml"
+    deployer = Deployer(manifest_dir=str(tmp_path))
+    existing = {"case"}
+    monkeypatch.setattr(deployer, "check_resource_exists", lambda kind, name: name in existing)
+
+    names = deployer.existing_service_names(tc)
+    assert names == ["case"]
+    assert deployer.manifest_replicas(tc, names) == 2
+
+    existing.add("service-b")
+    names = deployer.existing_service_names(tc)
+    assert names == ["case", "service-b"]
+    assert deployer.manifest_replicas(tc, names) == 5
+
+    # The primary is always checked so a missing target still fails.
+    existing.clear()
+    assert deployer.existing_service_names(tc) == ["case"]
+
+
+def test_wait_for_pods_checks_all_manifest_services(monkeypatch):
+    from conformance.deployer import Deployer
+
+    deployer = Deployer()
+    responses = {
+        "app.kubernetes.io/name=case,app.kubernetes.io/component=llminferenceservice-workload": "pod-a=Running",
+        "app.kubernetes.io/name=case,app.kubernetes.io/component=llminferenceservice-workload-prefill": "pod-prefill=Running",
+        "app.kubernetes.io/name=service-b,app.kubernetes.io/component=llminferenceservice-workload": "pod-b=Running",
+    }
+    monkeypatch.setattr(
+        deployer,
+        "kubectl",
+        lambda *args, **kwargs: responses.get(args[5], ""),
+    )
+    monkeypatch.setattr(deployer, "_check_crashloop", lambda name: [])
+
+    assert deployer.wait_for_pods(["case", "service-b"], timeout=1, min_pods=3) == [
+        "pod-a",
+        "pod-prefill",
+        "pod-b",
+    ]
+
+
+def test_cleanup_deletes_all_manifest_services(tmp_path, monkeypatch):
+    from conformance.deployer import Deployer
+
+    manifest_path = tmp_path / "multi.yaml"
+    manifest_path.write_text(
+        """apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: service-a
+spec: {}
+---
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: service-b
+spec: {}
+"""
+    )
+    tc = load_testcase("configs/testcases/lora-single.yaml")
+    tc.name = "case"
+    tc.deployment.manifest_path = "multi.yaml"
+    deployer = Deployer(manifest_dir=str(tmp_path))
+    deleted_services = []
+
+    def fake_kubectl(*args, **kwargs):
+        if args[:2] == ("delete", "llminferenceservice"):
+            deleted_services.append(args[2])
+        return ""
+
+    monkeypatch.setattr(deployer, "kubectl", fake_kubectl)
+
+    deployer.cleanup(tc, timeout=1)
+
+    assert deleted_services == ["case", "service-b"]
+
+
+@pytest.mark.parametrize("failed_service", ["case", "service-b"])
+def test_cleanup_failed_delete_stays_pending_for_teardown_retry(tmp_path, monkeypatch, failed_service):
+    import subprocess
+
+    from conformance.deployer import Deployer
+
+    from conftest import _teardown_deployer
+
+    (tmp_path / "multi.yaml").write_text(
+        """apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: service-a
+spec: {}
+---
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: service-b
+spec: {}
+"""
+    )
+    tc = load_testcase("configs/testcases/single-gpu-smoke.yaml")
+    tc.name = "case"
+    tc.deployment.manifest_path = "multi.yaml"
+    deployer = Deployer(manifest_dir=str(tmp_path))
+    deployer._applied[tc.name] = tc
+    remaining = {"case", "service-b"}
+    fail_once = True
+
+    def fake_run(cmd, **kwargs):
+        nonlocal fail_once
+        if cmd[1:3] == ["delete", "llminferenceservice"]:
+            name = cmd[3]
+            if name == failed_service and fail_once:
+                fail_once = False
+                return subprocess.CompletedProcess(cmd, 1, "", "API server unavailable")
+            remaining.discard(name)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("conformance.deployer.subprocess.run", fake_run)
+
+    with pytest.raises(RuntimeError, match="API server unavailable"):
+        deployer.cleanup(tc, timeout=1)
+
+    assert deployer.needs_cleanup(tc.name)
+    # Every other service is still deleted on the failing pass, not only on retry.
+    assert remaining == {failed_service}
+
+    _teardown_deployer(deployer, no_cleanup=False)
+
+    assert not remaining
+    assert not deployer.needs_cleanup(tc.name)
+
+
+def test_failed_multi_document_apply_is_cleaned_up(tmp_path, monkeypatch):
+    """kubectl apply can create earlier documents before a later one is rejected;
+    phase 99 must still delete every manifest service after a failed apply."""
+    from conformance.deployer import Deployer
+
+    manifest_path = tmp_path / "multi.yaml"
+    manifest_path.write_text(
+        """apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: service-a
+spec: {}
+---
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: service-b
+spec: {}
+"""
+    )
+    tc = load_testcase("configs/testcases/lora-single.yaml")
+    tc.name = "case"
+    tc.deployment.manifest_path = "multi.yaml"
+    deployer = Deployer(manifest_dir=str(tmp_path))
+    deleted_services = []
+
+    def fake_kubectl(*args, **kwargs):
+        if args[:2] == ("delete", "llminferenceservice"):
+            deleted_services.append(args[2])
+        return ""
+
+    def failing_apply(path):
+        raise RuntimeError("admission webhook denied service-b")
+
+    monkeypatch.setattr(deployer, "kubectl", fake_kubectl)
+    monkeypatch.setattr(deployer, "ensure_namespace", lambda: None)
+    monkeypatch.setattr(deployer, "_ensure_clean_slate", lambda name: None)
+    monkeypatch.setattr(deployer, "_apply_with_webhook_retry", failing_apply)
+
+    result = deployer.deploy(tc)
+
+    assert not result.success
+    assert "service-b" in result.error
+    assert not deployer.is_deployed(tc.name)
+    assert deployer.needs_cleanup(tc.name)
+
+    deployer.cleanup(tc, timeout=1)
+
+    assert deleted_services == ["case", "service-b"]
+    assert not deployer.needs_cleanup(tc.name)
+
+
+def test_deploy_failure_before_apply_needs_no_cleanup(tmp_path, monkeypatch):
+    from conformance.deployer import Deployer
+
+    manifest_path = tmp_path / "case.yaml"
+    manifest_path.write_text("apiVersion: serving.kserve.io/v1alpha2\nkind: LLMInferenceService\nspec: {}\n")
+    tc = load_testcase("configs/testcases/lora-single.yaml")
+    tc.name = "case"
+    tc.deployment.manifest_path = "case.yaml"
+    deployer = Deployer(manifest_dir=str(tmp_path))
+
+    def failing_namespace():
+        raise RuntimeError("namespace forbidden")
+
+    monkeypatch.setattr(deployer, "kubectl", lambda *args, **kwargs: "")
+    monkeypatch.setattr(deployer, "ensure_namespace", failing_namespace)
+
+    result = deployer.deploy(tc)
+
+    assert not result.success
+    assert not deployer.needs_cleanup(tc.name)
+
+
+def test_cleanup_pending_deletes_uncleaned_cases_and_honors_tc_cleanup(tmp_path, monkeypatch):
+    """Session teardown deletes cases an interrupted run left applied, but keeps cleanup: false cases."""
+    from conformance.deployer import Deployer
+
+    for name in ("interrupted", "keep-me"):
+        (tmp_path / f"{name}.yaml").write_text(
+            f"apiVersion: serving.kserve.io/v1alpha2\nkind: LLMInferenceService\nmetadata:\n  name: {name}\nspec: {{}}\n"
+        )
+    deployer = Deployer(manifest_dir=str(tmp_path))
+    for name, cleanup in (("interrupted", True), ("keep-me", False)):
+        tc = load_testcase("configs/testcases/single-gpu-smoke.yaml")
+        tc.name = name
+        tc.cleanup = cleanup
+        tc.deployment.manifest_path = f"{name}.yaml"
+        deployer._applied[name] = tc
+    deleted_services = []
+
+    def fake_kubectl(*args, **kwargs):
+        if args[:2] == ("delete", "llminferenceservice"):
+            deleted_services.append(args[2])
+        return ""
+
+    monkeypatch.setattr(deployer, "kubectl", fake_kubectl)
+
+    deployer.cleanup_pending()
+
+    assert deleted_services == ["interrupted"]
+    assert not deployer.needs_cleanup("interrupted")
+    assert deployer.needs_cleanup("keep-me")
+
+
+def test_remove_stale_services_deletes_only_suite_owned_leftovers(monkeypatch):
+    """Services left by a killed run hold GPUs and must go; services the suite did not deploy must stay."""
+    from conformance.deployer import MANAGED_LABEL, Deployer
+
+    deployer = Deployer()
+    owned = {"flow-control", "single-gpu"}
+    services = {"flow-control": True, "other-team": False, "single-gpu": True}
+
+    def fake_kubectl(*args, **kwargs):
+        selector = args[args.index("-l") + 1] if "-l" in args else ""
+        if selector == f"{MANAGED_LABEL}=true":
+            return " ".join(name for name, managed in services.items() if managed)
+        return " ".join(services)
+
+    cleaned = []
+    monkeypatch.setattr(deployer, "kubectl", fake_kubectl)
+    monkeypatch.setattr(deployer, "_ensure_clean_slate", cleaned.append)
+
+    assert deployer.remove_stale_services() == sorted(owned)
+    assert cleaned == sorted(owned)
+
+
+def test_deployer_teardown_cleans_up_when_port_forward_stop_fails():
+    """A port-forward that will not exit must not leave GPU-holding services behind."""
+    import subprocess
+
+    from conftest import _teardown_deployer
+
+    class FakeDeployer:
+        cleaned = False
+
+        def stop_port_forward(self):
+            raise subprocess.TimeoutExpired("kubectl port-forward", 5)
+
+        def cleanup_pending(self):
+            self.cleaned = True
+
+    deployer = FakeDeployer()
+    with pytest.raises(subprocess.TimeoutExpired):
+        _teardown_deployer(deployer, no_cleanup=False)
+    assert deployer.cleaned
+
+    kept = FakeDeployer()
+    with pytest.raises(subprocess.TimeoutExpired):
+        _teardown_deployer(kept, no_cleanup=True)
+    assert not kept.cleaned
+
+
+def test_multi_document_manifest_with_conflicting_models_fails(tmp_path):
+    from conformance.config import apply_manifest_model_config
+
+    tc = load_testcase("configs/testcases/lora-single.yaml")
+    manifest_path = tmp_path / "conflict.yaml"
+    manifest_path.write_text(
+        """apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: model-a
+spec:
+  model:
+    name: model-a
+    uri: hf://model-a
+---
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: model-b
+spec:
+  model:
+    name: model-b
+    uri: hf://model-a
+"""
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"manifest .*conflict\.yaml: LLMInferenceService documents declare different spec\.model name/uri/lora",
+    ):
+        apply_manifest_model_config(tc, manifest_path)
+
+
+@pytest.mark.parametrize("model_spec_yaml", ["spec: not-a-mapping\n", "spec:\n  model: not-a-mapping\n"])
+def test_manifest_non_mapping_spec_or_model_is_absent(tmp_path, model_spec_yaml):
+    from conformance.config import apply_manifest_model_config
+
+    tc = load_testcase("configs/testcases/lora-single.yaml")
+    expected_uri = tc.model.uri
+    expected_lora = tc.model.lora
+    manifest_path = tmp_path / "non-mapping.yaml"
+    manifest_path.write_text(
+        """apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: lora-single
+"""
+        + model_spec_yaml
+    )
+
+    apply_manifest_model_config(tc, manifest_path, model_name_override="cli-alias")
+
+    assert tc.model.name == "cli-alias"
+    assert tc.model.uri == expected_uri
+    assert tc.model.lora == expected_lora
+
+
+def test_manifest_without_llmisvc_keeps_testcase_and_cli_metadata(tmp_path):
+    from conformance.config import apply_manifest_model_config
+
+    tc = load_testcase("configs/testcases/lora-single.yaml")
+    expected_uri = tc.model.uri
+    expected_lora = tc.model.lora
+    manifest_path = tmp_path / "configmap.yaml"
+    manifest_path.write_text("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: unrelated\n")
+
+    apply_manifest_model_config(tc, manifest_path, model_name_override="cli-alias")
+
+    assert tc.model.name == "cli-alias"
+    assert tc.model.uri == expected_uri
+    assert tc.model.lora == expected_lora
+
+
+def test_discover_mode_uses_testcase_model_and_lora_with_cli_name_override(tmp_path):
+    from conftest import _resolve_test_cases
+
+    testcase_dir = tmp_path / "testcases"
+    manifest_dir = tmp_path / "deploy" / "manifests"
+    testcase_dir.mkdir()
+    manifest_dir.mkdir(parents=True)
+    (testcase_dir / "case.yaml").write_text(
+        """name: case
+model:
+  name: testcase/model
+  uri: hf://testcase/model
+  lora:
+    adapters:
+      - name: testcase-adapter
+        uri: hf://testcase/adapter
+deployment:
+  manifestPath: case.yaml
+"""
+    )
+    (manifest_dir / "case.yaml").write_text(
+        """apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: case
+spec:
+  model:
+    name: manifest/model
+    uri: hf://manifest/model
+    lora:
+      adapters:
+        - name: manifest-adapter
+          uri: hf://manifest/adapter
+"""
+    )
+
+    class PytestConfigStub:
+        rootpath = tmp_path
+
+        def getoption(self, name):
+            return {
+                "--testcase-dir": str(testcase_dir),
+                "--profile": "",
+                "--testcase": "",
+                "--mode": "discover",
+                "--model": "cli-alias",
+            }[name]
+
+    [tc] = _resolve_test_cases(PytestConfigStub())
+
+    assert tc.model.name == "cli-alias"
+    assert tc.model.uri == "hf://testcase/model"
+    assert tc.model.lora is not None
+    assert tc.model.lora.adapters == [{"name": "testcase-adapter", "uri": "hf://testcase/adapter"}]
+
+
+def test_cli_model_override_takes_precedence_over_manifest(tmp_path):
+    from conformance.config import load_testcase
+    from conformance.deployer import Deployer
+
+    manifest_path = tmp_path / "case.yaml"
+    manifest_path.write_text(
+        """apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: case
+spec:
+  model:
+    name: Qwen/Qwen3-0.6B
+    uri: hf://Qwen/Qwen3-0.6B
+"""
+    )
+    tc = load_testcase("configs/testcases/single-gpu-smoke.yaml")
+    tc.name = "case"
+    tc.deployment.manifest_path = "case.yaml"
+
+    deployer = Deployer(manifest_dir=str(tmp_path), model_override="served-alias")
+    patched = deployer._patch_manifest(manifest_path, tc)
+
+    assert patched[0]["spec"]["model"]["name"] == "served-alias"
+    assert patched[0]["spec"]["model"]["uri"] == "hf://Qwen/Qwen3-0.6B"
+    assert tc.model.name == "served-alias"
+
+
 def test_load_profile():
     profile = load_profile("configs/profiles/smoke.yaml")
     assert profile.name == "smoke"
@@ -1146,7 +1746,7 @@ def test_env_overrides_applied_to_decode_and_prefill():
     try:
         d = Deployer()
         result = d._patch_manifest(Path(tmp), tc)
-        spec = result["spec"]
+        spec = result[0]["spec"]
 
         for section_name in ("template", "prefill"):
             if section_name == "prefill":

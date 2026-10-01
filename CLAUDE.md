@@ -57,7 +57,7 @@ Makefile targets mirror CLI: `make test TESTCASE=single-gpu`, `make unittest`, `
 
 The `--mode` flag controls which phases execute:
 - **`deploy`** (default) — full lifecycle: deploy → validate → cleanup.
-- **`discover`** — skip deploy/cleanup, validate an existing deployment (requires `--endpoint` or auto-detected). Phases call `_require_deployed()` which returns early in discover mode.
+- **`discover`** — skip deploy/cleanup, validate an existing deployment (requires `--endpoint` or auto-detected). Phases call `_require_deployed()` which returns early in discover mode. Pod and readiness phases check the testcase-named primary service plus only those secondary manifest services that exist in the cluster (`Deployer.existing_service_names()`).
 - **`cache`** — run only the model download phase (create PVC + download Job), then exit.
 
 ### Ordered conformance phases
@@ -93,6 +93,17 @@ Phases skip themselves based on `tc` config flags or `--mode discover`.
 Two helpers control cascading skips across phases:
 - `_require_manifest(tc)` — skips if the manifest file doesn't exist for the current branch.
 - `_require_deployed(deployer, tc, test_mode)` — skips if deploy failed or was skipped. In discover mode, this check is bypassed.
+
+`test_99_cleanup` is gated separately by `Deployer.needs_cleanup(tc.name)`, which becomes true as soon as `kubectl apply` is attempted. A multi-document manifest can partially apply before a later document is rejected, so a failed deploy still gets cleaned up.
+
+### Leftover resources and GPUs
+
+Leftover LLMInferenceServices hold GPUs, so later test cases stay Pending. The suite guards against this in three places:
+- **Ctrl-C** — `cli.py:_run_pytest` waits for pytest to finish session teardown instead of killing it. A second Ctrl-C force-quits.
+- **Session teardown** — the `deployer` fixture calls `Deployer.cleanup_pending()`, which deletes every applied test case that phase 99 did not clean up (covers Ctrl-C and `-x`). It runs even if stopping port-forwards fails, and honors `tc.cleanup`.
+- **Run start** — in `--mode deploy`, the `deployer` fixture calls `Deployer.remove_stale_services()`, which deletes LLMInferenceServices left by a run that was killed outright (SIGKILL, closed terminal). It selects only services labeled `llm-d-e2e.opendatahub.io/managed=true` (`MANAGED_LABEL`, added by `_patch_manifest()`), so services the suite did not deploy are never touched.
+
+`--nocleanup` disables both the teardown cleanup and the start-of-run sweep.
 
 ### Fast-fail behaviors
 

@@ -24,6 +24,7 @@ select which cases run. Directory loaders use ``iter_config_yamls`` (``.yaml`` /
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -271,6 +272,62 @@ def _build(cls, data: dict | None):
         else:
             kwargs[snake_key] = val
     return cls(**kwargs)
+
+
+def load_manifest_documents(manifest_path: str | Path) -> list:
+    """Load every YAML document from a deployment manifest."""
+    with Path(manifest_path).open() as f:
+        return list(yaml.safe_load_all(f))
+
+
+def llmisvc_manifest_documents(documents: Iterable[object]) -> list[dict]:
+    """Keep only mapping documents that declare an LLMInferenceService."""
+    return [doc for doc in documents if isinstance(doc, dict) and doc.get("kind") == "LLMInferenceService"]
+
+
+def apply_manifest_model_config(tc: TestCase, manifest_path: str | Path, model_name_override: str = "") -> None:
+    """Use model and LoRA values from the deployment manifest when present.
+
+    Testcase YAML owns validation behavior; the manifest owns the deployed
+    model identity and adapter URIs. Testcase values remain fallback metadata
+    when the manifest is unavailable or omits those fields.
+    """
+    manifest_path = Path(manifest_path)
+    if manifest_path.is_file():
+        docs = llmisvc_manifest_documents(load_manifest_documents(manifest_path))
+        model_values = []
+        model_specs = []
+        for doc in docs:
+            spec = doc.get("spec")
+            model = spec.get("model") if isinstance(spec, dict) else None
+            model = model if isinstance(model, dict) else {}
+            model_specs.append(model)
+            model_values.append({key: model[key] for key in ("name", "uri", "lora") if key in model})
+
+        if model_values and any(values != model_values[0] for values in model_values[1:]):
+            raise ValueError(
+                f"manifest {manifest_path}: LLMInferenceService documents declare different spec.model name/uri/lora"
+            )
+
+        if model_specs:
+            model = model_specs[0]
+            if model.get("name") is not None:
+                tc.model.name = model["name"]
+            if model.get("uri") is not None:
+                tc.model.uri = model["uri"]
+            if "lora" in model:
+                lora = model["lora"]
+                if lora is None:
+                    tc.model.lora = None
+                elif isinstance(lora, dict):
+                    tc.model.lora = _build(LoRAConfig, lora)
+                else:
+                    raise ValueError(f"manifest {manifest_path}: spec.model.lora must be a mapping or null")
+
+    # The explicit CLI alias is the final override; it changes the served name,
+    # while the manifest remains the source of the model URI and LoRA artifacts.
+    if model_name_override:
+        tc.model.name = model_name_override
 
 
 def iter_config_yamls(directory: str | Path) -> list[Path]:

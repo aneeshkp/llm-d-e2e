@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from conformance.config import (
     TestCase,
+    apply_manifest_model_config,
     filter_by_names,
     load_profile,
     load_testcases_from_dir,
@@ -85,14 +86,28 @@ def _resolve_test_cases(config) -> list[TestCase]:
 
     if profile_path:
         profile = load_profile(profile_path)
-        return resolve_profile(profile, testcase_dir)
+        cases = resolve_profile(profile, testcase_dir)
+    else:
+        cases = load_testcases_from_dir(testcase_dir)
+        if testcase_names:
+            names = [n.strip() for n in testcase_names.split(",")]
+            cases = filter_by_names(cases, names)
 
-    all_cases = load_testcases_from_dir(testcase_dir)
-    if testcase_names:
-        names = [n.strip() for n in testcase_names.split(",")]
-        return filter_by_names(all_cases, names)
+    manifest_dir = Path(config.rootpath) / "deploy" / "manifests"
+    model_override = config.getoption("--model")
+    if config.getoption("--mode") == "discover":
+        if model_override:
+            for tc in cases:
+                tc.model.name = model_override
+        return cases
 
-    return all_cases
+    for tc in cases:
+        apply_manifest_model_config(
+            tc,
+            manifest_dir / tc.deployment.manifest_path,
+            model_name_override=model_override,
+        )
+    return cases
 
 
 def pytest_generate_tests(metafunc):
@@ -109,14 +124,30 @@ def deployer(request) -> Deployer:
         namespace=request.config.getoption("--namespace"),
         model_source=request.config.getoption("--model-source"),
         mock_image=request.config.getoption("--mock"),
+        model_override=request.config.getoption("--model"),
         render_image=request.config.getoption("--render-image"),
         pull_secret=request.config.getoption("--pull-secret"),
         disable_auth=request.config.getoption("--disable-auth"),
         decode_node_selector=request.config.getoption("--decode-node-selector"),
         prefill_node_selector=request.config.getoption("--prefill-node-selector"),
     )
+    # The test namespace belongs to the suite: services left by a killed run hold
+    # GPUs that this run needs. --nocleanup keeps them for inspection.
+    no_cleanup = request.config.getoption("--nocleanup")
+    if request.config.getoption("--mode") == "deploy" and not no_cleanup:
+        for name in d.remove_stale_services():
+            print(f"Deleted stale LLMInferenceService '{name}' from a previous run")
     yield d
-    d.stop_port_forward()
+    _teardown_deployer(d, no_cleanup)
+
+
+def _teardown_deployer(deployer: Deployer, no_cleanup: bool) -> None:
+    """Stop port-forwards, then delete pending test cases even if stopping them fails."""
+    try:
+        deployer.stop_port_forward()
+    finally:
+        if not no_cleanup:
+            deployer.cleanup_pending()
 
 
 @pytest.fixture(scope="session")

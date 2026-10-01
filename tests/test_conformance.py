@@ -68,6 +68,13 @@ def _require_deployed(deployer: Deployer, tc: TestCase, test_mode: str) -> None:
         pytest.skip(f"skipped — deploy failed or was skipped for '{tc.name}'")
 
 
+def _target_service_names(deployer: Deployer, tc: TestCase, test_mode: str) -> list[str]:
+    """Services to validate: every manifest service, or only those the existing target deployed in discover mode."""
+    if test_mode == "discover":
+        return deployer.existing_service_names(tc)
+    return deployer.manifest_service_names(tc)
+
+
 def _require_gpu(deployer: Deployer, tc: TestCase, mock_mode: bool, test_mode: str) -> None:
     if test_mode == "discover":
         return
@@ -152,17 +159,19 @@ class TestConformance:
         _require_deployed(deployer, tc, test_mode)
         timeout = tc.deployment.ready_timeout.total_seconds()
         _log(f"Waiting for pods to be Running (timeout: {timeout:.0f}s)")
-        pods = deployer.wait_for_pods(tc.name, timeout=timeout, print_fn=_log)
+        service_names = _target_service_names(deployer, tc, test_mode)
+        expected = deployer.manifest_replicas(tc, service_names)
+        pods = deployer.wait_for_pods(service_names, timeout=timeout, print_fn=_log, min_pods=expected)
         _log(f"All pods running: {', '.join(pods)}")
-        expected = deployer.manifest_replicas(tc)
         assert len(pods) >= expected, f"Expected {expected} pods, got {len(pods)}"
 
     def test_06_ready(self, deployer: Deployer, tc: TestCase, test_mode: str):
         """LLMInferenceService should become Ready."""
         _require_deployed(deployer, tc, test_mode)
-        _log(f"Waiting for '{tc.name}' Ready=True")
-        deployer.wait_for_ready(tc, print_fn=_log)
-        _log(f"'{tc.name}' is Ready")
+        for service_name in _target_service_names(deployer, tc, test_mode):
+            _log(f"Waiting for '{service_name}' Ready=True")
+            deployer.wait_for_ready(tc, print_fn=_log, service_name=service_name)
+            _log(f"'{service_name}' is Ready")
 
     def test_07_health(self, pod_client: LLMClient, tc: TestCase, pod_endpoint: str):
         """Health endpoint should return 200 (direct pod access, bypasses gateway EPP)."""
@@ -538,8 +547,8 @@ class TestConformance:
             pytest.skip("--nocleanup set")
         if not tc.cleanup:
             pytest.skip("cleanup disabled in test case config")
-        if test_mode != "discover" and not deployer.is_deployed(tc.name):
-            pytest.skip(f"nothing to clean up — deploy was not successful for '{tc.name}'")
+        if test_mode != "discover" and not deployer.needs_cleanup(tc.name):
+            pytest.skip(f"nothing to clean up — no manifest was applied for '{tc.name}'")
         _log(f"Cleaning up '{tc.name}'...")
         deployer.cleanup(tc)
         _log("Cleanup complete")
