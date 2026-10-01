@@ -27,6 +27,7 @@ config, when the manifest is missing, or when deploy failed / discover mode):
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -226,10 +227,11 @@ class TestConformance:
             plain_prompts = [f"({i}) {p}" for i in range(repeat) for p in plain_prompts]
             _log(f"Repeating prompts x{repeat} → {len(plain_prompts)} requests")
 
-        if tc.validation.chat_prompts:
-            for entry in tc.validation.chat_prompts:
-                if isinstance(entry, dict) and entry.get("tools"):
-                    continue
+        plain_chat_prompts = [
+            entry for entry in tc.validation.chat_prompts if not (isinstance(entry, dict) and entry.get("tools"))
+        ]
+        if plain_chat_prompts:
+            for entry in plain_chat_prompts:
                 messages = chat_prompt_to_messages(entry)
                 assert messages, f"chatPrompts entry has no 'system' or 'user' key: {entry}"
                 _log(f"Sending chat prompt ({len(messages)} message(s)): '{messages[-1]['content'][:50]}...'")
@@ -304,10 +306,24 @@ class TestConformance:
         for entry in tool_entries:
             messages = chat_prompt_to_messages(entry)
             tools = entry["tools"]
+            defined_tools = {}
+            for tool in tools:
+                if not isinstance(tool, dict) or tool.get("type") != "function":
+                    continue
+                function = tool.get("function")
+                name = function.get("name") if isinstance(function, dict) else None
+                assert name, f"Tool definition must include function.name: {tool}"
+                defined_tools[name] = function
+
             label = f"'{messages[-1]['content'][:50]}...'"
             _log(f"Sending tool-call prompt ({len(tools)} tool(s)): {label}")
 
-            resp = client.chat(model=tc.model.name, prompt=messages, tools=tools, max_tokens=256)
+            resp = client.chat(
+                model=tc.model.name,
+                prompt=messages,
+                tools=tools,
+                max_tokens=tc.validation.tool_call_max_tokens,
+            )
 
             choice = resp.get("choices", [{}])[0]
             message = choice.get("message", {})
@@ -319,11 +335,29 @@ class TestConformance:
                 f"Expected tool_calls for {label} but got none "
                 f"(finish_reason={finish}, content={str(message.get('content', ''))[:80]})"
             )
-            called_names = [tc_item["function"]["name"] for tc_item in tool_calls]
+            called_names = [
+                tc_item.get("function", {}).get("name") if isinstance(tc_item, dict) else None for tc_item in tool_calls
+            ]
             _log(f"Tool calls: {called_names} (finish_reason={finish})")
-            defined_names = {t["function"]["name"] for t in tools if t.get("type") == "function"}
-            for name in called_names:
-                assert name in defined_names, f"Model called unknown tool '{name}', defined: {defined_names}"
+            for tool_call in tool_calls:
+                function = tool_call.get("function") if isinstance(tool_call, dict) else None
+                function = function if isinstance(function, dict) else {}
+                name = function.get("name")
+                assert name in defined_tools, f"Model called unknown tool '{name}', defined: {set(defined_tools)}"
+
+                raw_arguments = function.get("arguments")
+                try:
+                    arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
+                except json.JSONDecodeError as exc:
+                    pytest.fail(f"Tool '{name}' returned invalid JSON arguments: {exc}")
+                assert isinstance(arguments, dict), f"Tool '{name}' arguments must be a JSON object"
+
+                parameters = defined_tools[name].get("parameters", {})
+                required = parameters.get("required", []) if isinstance(parameters, dict) else []
+                missing = [key for key in required if key not in arguments]
+                assert not missing, f"Tool '{name}' is missing required arguments: {missing}"
+                empty = [key for key in required if isinstance(arguments[key], str) and not arguments[key].strip()]
+                assert not empty, f"Tool '{name}' has empty required arguments: {empty}"
 
     def test_10_metrics_vllm(self, deployer: Deployer, scraper: Scraper, tc: TestCase, test_mode: str):
         """vLLM metrics should show successful requests."""

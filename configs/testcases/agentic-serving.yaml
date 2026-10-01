@@ -11,7 +11,7 @@ model:
     keepPVC: true
     timeout: 30m
 deployment:
-  manifestPath: agentic-serving.yaml
+  manifestPath: tool-calling.yaml
   requiresGpu: true
   readyTimeout: 20m
 validation:
@@ -19,6 +19,7 @@ validation:
   healthPort: 8000
   healthScheme: HTTPS
   inferenceCheck: true
+  toolCallMaxTokens: 1024
   chatPrompts:
     - system: "You are a helpful assistant with access to tools."
       user: "What is the weather in San Francisco right now?"
@@ -43,4 +44,5 @@ validation:
     enabled: true
     checkVLLM: true
     checkEPP: true
+    checkScheduler: true
 cleanup: true
