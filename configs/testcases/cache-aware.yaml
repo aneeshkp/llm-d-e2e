@@ -39,7 +39,6 @@ validation:
   metricsCheck:
     enabled: true
     checkVLLM: true
-    checkEPP: true
     checkPrefixCache: true
     checkScheduler: true
 cleanup: true

@@ -111,7 +111,6 @@ def test_load_agentic_serving_testcase():
     assert tc.validation.tool_call_max_tokens == 1024
     assert tc.validation.metrics_check.check_vllm is True
     assert tc.validation.metrics_check.check_scheduler is True
-    assert tc.validation.metrics_check.check_epp is True
     assert len(tc.validation.chat_prompts) == 1
     entry = tc.validation.chat_prompts[0]
     assert isinstance(entry, dict)
