@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from contextlib import closing
 from pathlib import Path
 
 import httpx
@@ -17,11 +18,8 @@ def test_create_api_key_sends_bearer_user_token_and_name():
         requests.append(request)
         return httpx.Response(201, json={"key": "sk-oai-test"})
 
-    client = MaaSClient("http://maas.example", transport=httpx.MockTransport(handler))
-    try:
+    with closing(MaaSClient("http://maas.example", transport=httpx.MockTransport(handler))) as client:
         response = client.create_api_key("k8s-user-token", "llm-d-e2e")
-    finally:
-        client.close()
 
     assert response.status_code == 201
     assert requests[0].url.path == "/v1/api-keys"
@@ -36,11 +34,8 @@ def test_chat_completion_uses_api_key_bearer_and_returns_error_responses():
         requests.append(request)
         return httpx.Response(429, json={"error": "rate limit"})
 
-    client = MaaSClient("http://maas.example", transport=httpx.MockTransport(handler))
-    try:
+    with closing(MaaSClient("http://maas.example", transport=httpx.MockTransport(handler))) as client:
         response = client.chat_completion("publishers/llm/models/qwen", "hello", api_key="sk-oai-test")
-    finally:
-        client.close()
 
     assert response.status_code == 429
     assert requests[0].url.path == "/v1/chat/completions"
@@ -57,11 +52,8 @@ def test_chat_completion_can_send_unauthenticated_request():
         requests.append(request)
         return httpx.Response(401)
 
-    client = MaaSClient("http://maas.example", transport=httpx.MockTransport(handler))
-    try:
+    with closing(MaaSClient("http://maas.example", transport=httpx.MockTransport(handler))) as client:
         response = client.chat_completion("model-alias", "hello")
-    finally:
-        client.close()
 
     assert response.status_code == 401
     assert "authorization" not in requests[0].headers
