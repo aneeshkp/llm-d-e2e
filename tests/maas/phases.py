@@ -21,15 +21,15 @@ from conformance.maas import (
     MaaSClient,
     MaaSTarget,
     create_user_token,
-    endpoint_with_scheme,
+    exhaust_token_quota,
+    maas_urls,
     manifest_maas_resources,
+    manifest_subscription,
     wait_for_maas_ready,
 )
 
-# How many requests fit in the subscription's token quota depends on response lengths,
-# so send short requests until the quota is spent; this bound fails a never-enforced limit.
-RATE_LIMIT_MAX_REQUESTS = 30
-RATE_LIMIT_MAX_TOKENS = 50
+# Output-token cap for authenticated requests, so 30d cannot spend the quota 30e measures.
+REQUEST_MAX_TOKENS = 16
 
 
 _MANIFEST_DIR = Path(__file__).resolve().parents[2] / "deploy" / "manifests"
@@ -52,14 +52,17 @@ class MaaSPhases:
     def maas_target(self, deployer: Deployer, tc: TestCase, test_mode: str) -> MaaSTarget:
         if test_mode != "discover" and not deployer.is_deployed(tc.name):
             pytest.skip(f"skipped — deploy failed or was skipped for '{tc.name}'")
-        resources = manifest_maas_resources(deployer.manifest_dir / tc.deployment.manifest_path, deployer.namespace)
-        return MaaSTarget(resources=resources)
+        manifest_path = deployer.manifest_dir / tc.deployment.manifest_path
+        return MaaSTarget(
+            resources=manifest_maas_resources(manifest_path, deployer.namespace),
+            subscription=manifest_subscription(manifest_path),
+        )
 
     @pytest.fixture(scope="class")
     def maas_client(self, maas_target: MaaSTarget, tc: TestCase) -> MaaSClient:
-        if not maas_target.endpoint:
+        if not maas_target.model_url:
             pytest.skip("MaaS route is not ready — see test_30a_maas_ready")
-        client = MaaSClient(maas_target.endpoint, timeout=tc.validation.timeout.total_seconds())
+        client = MaaSClient(maas_target.api_url, maas_target.model_url, timeout=tc.validation.timeout.total_seconds())
         yield client
         client.close()
 
@@ -71,9 +74,9 @@ class MaaSPhases:
         )
         assert status.get("endpoint"), "MaaSModelRef status has no endpoint"
         assert status.get("resolvedModelAlias"), "MaaSModelRef status has no resolvedModelAlias"
-        maas_target.endpoint = endpoint_with_scheme(status["endpoint"], tc.validation.maas.endpoint_scheme)
+        maas_target.model_url, maas_target.api_url = maas_urls(status["endpoint"], tc.validation.maas.endpoint_scheme)
         maas_target.model_alias = status["resolvedModelAlias"]
-        print(f"  → MaaS endpoint {maas_target.endpoint}, model {maas_target.model_alias}")
+        print(f"  → MaaS model {maas_target.model_alias} at {maas_target.model_url}, API {maas_target.api_url}")
 
     @_for_maas_manifests
     def test_30b_maas_unauthenticated(self, maas_client: MaaSClient, maas_target: MaaSTarget):
@@ -83,10 +86,16 @@ class MaaSPhases:
 
     @_for_maas_manifests
     def test_30c_maas_api_key(self, deployer: Deployer, maas_client: MaaSClient, maas_target: MaaSTarget):
-        """A Kubernetes user token can create an API key."""
-        response = maas_client.create_api_key(create_user_token(deployer.kubectl), "llm-d-e2e")
+        """A Kubernetes user token can create an API key bound to the testcase's subscription."""
+        assert maas_target.subscription, "manifest declares no MaaSSubscription"
+        # Bind explicitly: otherwise MaaS picks the highest-priority accessible subscription.
+        response = maas_client.create_api_key(
+            create_user_token(deployer.kubectl), "llm-d-e2e", subscription=maas_target.subscription.name
+        )
         assert response.status_code == 201, response.text
-        maas_target.api_key = response.json().get("key", "")
+        body = response.json()
+        assert body.get("subscription") == maas_target.subscription.name, f"key bound to the wrong subscription: {body}"
+        maas_target.api_key = body.get("key", "")
         assert maas_target.api_key.startswith("sk-oai-"), "API-key creation must return the plaintext key once"
 
     @_for_maas_manifests
@@ -94,7 +103,9 @@ class MaaSPhases:
         """Authenticated inference through the MaaS route succeeds."""
         if not maas_target.api_key:
             pytest.skip("no API key — see test_30c_maas_api_key")
-        response = maas_client.chat_completion(maas_target.model_alias, "hello", api_key=maas_target.api_key)
+        response = maas_client.chat_completion(
+            maas_target.model_alias, "hello", api_key=maas_target.api_key, max_tokens=REQUEST_MAX_TOKENS
+        )
         assert response.status_code == 200, response.text
         assert response.json().get("choices"), "authenticated MaaS inference must return a completion"
 
@@ -103,17 +114,11 @@ class MaaSPhases:
         """The subscription's token rate limit rejects requests once the quota is spent."""
         if not maas_target.api_key:
             pytest.skip("no API key — see test_30c_maas_api_key")
-        statuses: list[int] = []
-        for _ in range(RATE_LIMIT_MAX_REQUESTS):
-            response = maas_client.chat_completion(
-                maas_target.model_alias,
-                "Write a long essay about AI",
-                api_key=maas_target.api_key,
-                max_tokens=RATE_LIMIT_MAX_TOKENS,
-            )
-            statuses.append(response.status_code)
-            if response.status_code != 200:
-                break
+        if not maas_target.subscription.token_limit:
+            pytest.skip(f"MaaSSubscription/{maas_target.subscription.name} declares no token rate limit")
+        statuses = exhaust_token_quota(
+            maas_client, maas_target.model_alias, maas_target.api_key, maas_target.subscription, REQUEST_MAX_TOKENS
+        )
         print(f"  → {statuses.count(200)} request(s) within quota, then {statuses[-1]}")
         assert statuses[0] == 200, f"the first request within quota should succeed; got {statuses}"
         assert statuses[-1] == 429, f"requests over quota must get 429; got {statuses}"
