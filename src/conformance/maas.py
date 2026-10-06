@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -73,7 +73,6 @@ def wait_for_maas_ready(
     resources: list[MaaSResource],
     timeout: float,
     poll_interval: float = 5,
-    sleep: Callable[[float], None] = time.sleep,
 ) -> dict:
     """Wait until every MaaS resource reaches its active phase; return the MaaSModelRef status.
 
@@ -105,16 +104,14 @@ def wait_for_maas_ready(
                     f"Timed out after {timeout:g}s waiting for {resource.kind}/{resource.name} "
                     f"to become {target} (phase={phase}; {detail})"
                 )
-            sleep(poll_interval)
+            time.sleep(poll_interval)
     return model_ref_status
 
 
 def endpoint_with_scheme(endpoint: str, scheme: str) -> str:
     """Override the MaaSModelRef endpoint scheme (e.g. ``http`` where port 443 is blocked)."""
     parsed = urlsplit(endpoint)
-    if scheme:
-        parsed = parsed._replace(scheme=scheme)
-    return urlunsplit(parsed).rstrip("/")
+    return parsed._replace(scheme=scheme or parsed.scheme).geturl().rstrip("/")
 
 
 def patch_maas_refs(documents: list, primary_name: str | None, service_name: str, namespace: str) -> None:

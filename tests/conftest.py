@@ -122,17 +122,9 @@ def pytest_collection_modifyitems(config, items):
     Phases a test case's config turns off are not applicable rather than skipped,
     so they do not appear in the run; runtime skips (deploy failed, missing
     manifest, not enough GPUs) still report as SKIPPED.
-
-    Phases inherited from another file (MaaS phases in tests/maas/phases.py) are
-    reported at their node's file, so verbose output does not append
-    ``<- tests/maas/phases.py``; the phase name already identifies the group.
     """
     selected, deselected = [], []
     for item in items:
-        path, _, domain = item.location
-        node_file = item.nodeid.split("::")[0]
-        if path != node_file:
-            item.location = (node_file, None, domain)
         marker = item.get_closest_marker("applies_when")
         callspec = getattr(item, "callspec", None)
         tc = callspec.params.get("tc") if callspec else None
