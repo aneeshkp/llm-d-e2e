@@ -37,6 +37,7 @@ Prefer `-p` for CI / release suites; use `-t` when you need one or two cases.
 | `pd` | `pd` | Prefill/decode disaggregation |
 | `pd-performance` | `pd-performance` | GuideLLM P/D benchmarks |
 | `moe` | `moe` | Needs 8 GPUs + RDMA/RoCE |
+| `maas` | `maas-single-gpu` | Needs the MaaS stack (RHCL/Kuadrant, maas-api, maas-default-gateway) |
 | `3.4` | single-gpu (+ no-scheduler), cache-aware | RHOAI 3.4 suite |
 | `3.5` | single-gpu, cache-aware, flow-control*, pd, lora*, kv-offloading* | RHOAI 3.5 (auto-skips tests needing more GPUs than available) |
 | `3.6` | same as `3.5` | RHOAI 3.6 EA2 has no differences from 3.5 |
