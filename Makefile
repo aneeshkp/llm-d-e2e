@@ -168,10 +168,6 @@ test-profile-moe: ## Run MoE/DeepSeek tests
 test-profile-flow-control: ## Run flow control tests
 	uv run pytest $(PYTEST_ARGS) --profile configs/profiles/flow-control.yaml
 
-.PHONY: test-profile-maas
-test-profile-maas: ## Run MaaS tests (needs the MaaS stack installed)
-	uv run pytest $(PYTEST_ARGS) --profile configs/profiles/maas.yaml
-
 .PHONY: unittest
 unittest: ## Run unit tests (no cluster needed)
 	uv run pytest tests/ -v --ignore=tests/test_conformance.py

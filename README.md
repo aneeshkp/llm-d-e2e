@@ -323,10 +323,13 @@ The benchmark adds three phases after the standard conformance checks:
 
 ## MaaS Tests
 
-`maas-single-gpu` (profile `maas`) deploys `single-gpu` through Models-as-a-Service and, after the standard llm-d phases, checks the governed route: unauthenticated request → 401, API key creation → 201, authenticated inference → 200, subscription token rate limit → 429. Its manifest (`maas-single-gpu.yaml`) holds the LLMInferenceService bound to both `inference-gateway` and `maas-default-gateway` — the MaaS controller only governs routes on the MaaS gateway — plus its `MaaSModelRef`, `MaaSAuthPolicy`, and `MaaSSubscription`. MaaS phases live in `tests/maas/` and are deselected for test cases whose manifest declares no `MaaSModelRef`.
+`maas-single-gpu` deploys `single-gpu` through Models-as-a-Service and, after the standard llm-d phases, checks the governed route: unauthenticated request → 401, API key creation → 201, authenticated inference → 200, subscription token rate limit → 429. Its manifest (`maas-single-gpu.yaml`) holds the LLMInferenceService bound to both `inference-gateway` and `maas-default-gateway` — the MaaS controller only governs routes on the MaaS gateway — plus its `MaaSModelRef`, `MaaSAuthPolicy`, and `MaaSSubscription`. MaaS phases live in `tests/maas/` and are deselected for test cases whose manifest declares no `MaaSModelRef`.
+
+MaaS suites are versioned like the llm-d ones (`maas-3.5`, `maas-3.6`); run them against the same manifest branch as the llm-d profile, on a cluster with the MaaS stack:
 
 ```bash
-uv run llm-d-e2e -t maas-single-gpu --mock -v
+uv run llm-d-e2e -p configs/profiles/3.6.yaml      --setup 3.6-ea2 --platform aks --html reports/report.html      --mock -v
+uv run llm-d-e2e -p configs/profiles/maas-3.6.yaml --setup 3.6-ea2 --platform aks --html reports/maas-report.html --mock -v
 ```
 
 Prerequisites: the MaaS stack installed — RHCL (Kuadrant: Authorino, Limitador), the MaaS Postgres database and `maas-db-config` Secret, and the RHAII chart with `components.aigateway.modelsAsAService.enabled=true`, which creates both gateways. On xKS, `validation.maas.endpointScheme: http` is set because the MaaS gateway's port 443 is not reachable externally and its certificate only covers in-cluster names.

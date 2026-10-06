@@ -1,7 +1,0 @@
-name: maas
-description: "MaaS conformance tests — requires the MaaS stack (RHCL/Kuadrant, maas-api, maas-default-gateway)"
-platform: any
-testCases:
-  - maas-single-gpu
-parallel: false
-timeout: 60m

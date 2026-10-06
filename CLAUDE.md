@@ -229,7 +229,7 @@ As of [odh-gitops PR#156](https://github.com/opendatahub-io/odh-gitops/pull/156)
 ## Config files
 
 - **configs/testcases/*.yaml** — Each file maps to one `TestCase` dataclass. Contains model info (including LoRA adapters), deployment spec, validation criteria, and metrics check flags.
-- **configs/profiles/*.yaml** — Named groups of test case names. Includes version-specific profiles (`3.4.yaml`, `3.5.yaml`, `3.5-gpu.yaml`) and topology profiles (`smoke`, `pd`, `cache-aware`, `flow-control`, `lora`, `maas`).
+- **configs/profiles/*.yaml** — Named groups of test case names. Includes version-specific profiles (`3.4.yaml`, `3.5.yaml`, `3.5-gpu.yaml`, `maas-3.5.yaml`, `maas-3.6.yaml`) and topology profiles (`smoke`, `pd`, `cache-aware`, `flow-control`, `lora`).
 - **deploy/manifests/*.yaml** — LLMInferenceService manifests, cloned from the manifest repo via `--setup`. Gitignored.
 - **deploy/manifests/.manifest-ref** — Tracks the active manifest branch, repo URL, commit SHA, and clone timestamp.
 
