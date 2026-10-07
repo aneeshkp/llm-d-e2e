@@ -53,6 +53,9 @@ MAAS_API_INFRA_NAMESPACE = "redhat-ai-gateway-infra"
 # The namespace-local MaasTenantConfig generated for every AITenant.
 TENANT_CONFIG_NAME = "default-tenant"
 
+# The controller's deterministic tenant namespace prefix (platform_context.go).
+TENANT_NAMESPACE_PREFIX = "ai-tenant-"
+
 # Payload-processing contract (upstream praxis/constants.py).
 PAYLOAD_PROCESSING_TYPE_ANNOTATION = "maas.opendatahub.io/payload-processing-type"
 PAYLOAD_PROCESSING_STATUS_ANNOTATION = "maas.opendatahub.io/payload-processing-status"
@@ -68,6 +71,8 @@ LEGACY_IPP_PRE_PROCESSING_NAME_BASE = "payload-pre-processing"
 LEGACY_IPP_PLUGINS_CONFIGMAP_NAME_BASE = "payload-processing-plugins"
 MAAS_API_NAME_BASE = "maas-api"
 MAAS_API_ROUTE_NAME_BASE = "maas-api-route"
+MAAS_API_KEY_CLEANUP_NAME_BASE = "maas-api-key-cleanup"
+MAAS_API_REVOKE_KEYS_NAME_BASE = "maas-api-revoke-keys"
 
 # Legacy IPP ConfigMap keys and container args (upstream praxis/constants.py).
 LEGACY_IPP_CUSTOM_CONFIG_DATA_KEY = "custom-ipp-config.yaml"
@@ -387,6 +392,16 @@ def maas_api_route_name(tenant: PraxisTenant) -> str:
     return f"{MAAS_API_ROUTE_NAME_BASE}-{tenant.aitenant_name}"
 
 
+def maas_api_key_cleanup_name(tenant: PraxisTenant) -> str:
+    """Per-tenant API key cleanup CronJob name in the maas-api infra namespace."""
+    return f"{MAAS_API_KEY_CLEANUP_NAME_BASE}-{tenant.aitenant_name}"
+
+
+def maas_api_revoke_keys_name(tenant: PraxisTenant) -> str:
+    """The CronJob's deterministic Job name (observed on xKS)."""
+    return f"{MAAS_API_REVOKE_KEYS_NAME_BASE}-{tenant.aitenant_name}"
+
+
 def tenant_owned_shared_namespace_resources(tenant: PraxisTenant) -> list[tuple[str, str, str]]:
     """Per-tenant resources in shared namespaces the forced teardown must sweep.
 
@@ -403,6 +418,8 @@ def tenant_owned_shared_namespace_resources(tenant: PraxisTenant) -> list[tuple[
         ("deployment", maas_api_deployment_name(tenant), MAAS_API_INFRA_NAMESPACE),
         ("service", maas_api_deployment_name(tenant), MAAS_API_INFRA_NAMESPACE),
         ("httproute", maas_api_route_name(tenant), MAAS_API_INFRA_NAMESPACE),
+        ("cronjob", maas_api_key_cleanup_name(tenant), MAAS_API_INFRA_NAMESPACE),
+        ("job", maas_api_revoke_keys_name(tenant), MAAS_API_INFRA_NAMESPACE),
     ]
 
 
@@ -848,6 +865,21 @@ def _teardown(kubectl: Callable[..., str], tenant: PraxisTenant, timeout: float,
     )
 
 
+def _derived_tenant(name: str) -> PraxisTenant:
+    """The tenant's generated refs, derived from the applied manifests.
+
+    Used when bootstrap fails before the AITenant status reports them: the controller's
+    namespace prefix is deterministic and the Gateway is the bootstrap one this run applied.
+    """
+    return PraxisTenant(
+        aitenant_name=name,
+        aitenant_namespace=AITENANT_NAMESPACE,
+        tenant_namespace=f"{TENANT_NAMESPACE_PREFIX}{name}",
+        gateway_name=name,
+        gateway_namespace=GATEWAY_NAMESPACE,
+    )
+
+
 @contextmanager
 def create_praxis_tenant(
     deployer: Deployer,
@@ -860,25 +892,29 @@ def create_praxis_tenant(
 
     The AITenant admission webhook requires a dedicated Gateway per tenant, so each run
     provisions a ClusterIP bootstrap Gateway in the shared gateway namespace. Only
-    test-owned resources are created or deleted; teardown runs even when the body fails.
+    test-owned resources are created or deleted; teardown runs even when the body fails
+    or the bootstrap itself never reaches Ready.
     """
     kubectl = deployer.kubectl
     check_praxis_prerequisites(kubectl)
     name = praxis_tenant_name(run_id or uuid.uuid4().hex[:8])
-    _apply(kubectl, bootstrap_configmap_manifest(name, GATEWAY_NAMESPACE))
-    _apply(kubectl, bootstrap_gateway_manifest(name, GATEWAY_NAMESPACE))
-    _wait_gateway_programmed(kubectl, name, GATEWAY_NAMESPACE, timeout, poll_interval)
-    _apply(kubectl, aitenant_manifest(name, AITENANT_NAMESPACE, gateway_name=name))
-    tenant_namespace, gateway_name, gateway_namespace = _wait_aitenant_status(kubectl, name, timeout, poll_interval)
-    wait_aitenant_ready(kubectl, name, timeout, poll_interval)
-    tenant = PraxisTenant(
-        aitenant_name=name,
-        aitenant_namespace=AITENANT_NAMESPACE,
-        tenant_namespace=tenant_namespace,
-        gateway_name=gateway_name,
-        gateway_namespace=gateway_namespace,
-    )
+    tenant: PraxisTenant | None = None
     try:
+        _apply(kubectl, bootstrap_configmap_manifest(name, GATEWAY_NAMESPACE))
+        _apply(kubectl, bootstrap_gateway_manifest(name, GATEWAY_NAMESPACE))
+        _wait_gateway_programmed(kubectl, name, GATEWAY_NAMESPACE, timeout, poll_interval)
+        _apply(kubectl, aitenant_manifest(name, AITENANT_NAMESPACE, gateway_name=name))
+        tenant_namespace, gateway_name, gateway_namespace = _wait_aitenant_status(kubectl, name, timeout, poll_interval)
+        tenant = PraxisTenant(
+            aitenant_name=name,
+            aitenant_namespace=AITENANT_NAMESPACE,
+            tenant_namespace=tenant_namespace,
+            gateway_name=gateway_name,
+            gateway_namespace=gateway_namespace,
+        )
+        wait_aitenant_ready(kubectl, name, timeout, poll_interval)
         yield tenant
     finally:
-        _teardown(kubectl, tenant, teardown_timeout, poll_interval)
+        # a bootstrap that never reaches Ready (e.g. the controller cannot reconcile the
+        # tenant) must not leak the applied Gateway, ConfigMap, and AITenant either
+        _teardown(kubectl, tenant or _derived_tenant(name), teardown_timeout, poll_interval)

@@ -725,6 +725,8 @@ def test_sweep_list_covers_only_test_owned_shared_namespace_resources():
     assert ("deployment", f"maas-api-{NAME}") in by_kind_name
     assert ("service", f"maas-api-{NAME}") in by_kind_name
     assert ("httproute", f"maas-api-route-{NAME}") in by_kind_name
+    assert ("cronjob", f"maas-api-key-cleanup-{NAME}") in by_kind_name
+    assert ("job", f"maas-api-revoke-keys-{NAME}") in by_kind_name
     for _kind, name, namespace in resources:
         assert NAME in name, name
         assert namespace in (praxis.GATEWAY_NAMESPACE, praxis.MAAS_API_INFRA_NAMESPACE)
@@ -798,3 +800,58 @@ def test_shared_state_guard_captures_and_compares_shared_resources():
     fake.serve("service", "maas-default-gateway-istio", json.dumps({"spec": {"type": "ClusterIP"}}))
     with pytest.raises(AssertionError, match="shared"):
         _assert_shared_state_unchanged(fake, state)
+
+
+def test_failed_bootstrap_still_cleans_up_every_test_owned_resource():
+    """A tenant whose reconcile never reaches Ready (e.g. the RBAC defect) must not leak."""
+    fake = FakeKubectl()
+    _serve_cluster(fake)
+    fake.serve("gateway", NAME, json.dumps({"status": {"conditions": _conditions(("Programmed", "True"))}}))
+    # the status reports the generated refs, but Ready never comes and the detail is persistent
+    fake.serve("aitenants", NAME, _aitenant_json(phase="Pending", tenant_namespace=TENANT_NS, ready="False"))
+    fake.serve(
+        "maastenantconfigs",
+        "default-tenant",
+        json.dumps(
+            {
+                "status": {
+                    "conditions": [
+                        {"type": "Ready", "status": "False", "message": "apply ClusterRole /maas-api: forbidden"}
+                    ]
+                }
+            }
+        ),
+    )
+    fake.serve("namespace", TENANT_NS, _namespace_that_disappears_with(fake, ("aitenants", NAME)))
+
+    with pytest.raises(RuntimeError, match="not Ready"):
+        with create_praxis_tenant(
+            _deployer(fake), timeout=5, poll_interval=0, run_id=RUN_ID, teardown_timeout=0.5
+        ) as tenant:
+            raise AssertionError(f"the tenant must not be yielded, got {tenant}")
+
+    deleted = {(args[1], args[2]) for args in fake.deleted}
+    assert ("aitenants", NAME) in deleted
+    assert ("gateway", NAME) in deleted
+    assert ("configmap", f"{NAME}-config") in deleted
+
+
+def test_failed_bootstrap_before_status_cleans_up_with_derived_refs():
+    """A bootstrap that fails before the status reports refs still tears everything down."""
+    fake = FakeKubectl()
+    _serve_cluster(fake)
+    fake.serve("gateway", NAME, json.dumps({"status": {"conditions": _conditions(("Programmed", "True"))}}))
+    fake.serve("aitenants", NAME, _aitenant_json(phase="Pending"))
+    fake.serve("namespace", TENANT_NS, _namespace_that_disappears_with(fake, ("aitenants", NAME)))
+
+    with pytest.raises(TimeoutError, match="tenantNamespace"):
+        with create_praxis_tenant(_deployer(fake), timeout=0.2, poll_interval=0, run_id=RUN_ID, teardown_timeout=0.5):
+            raise AssertionError("the tenant must not be yielded")
+
+    deleted = {(args[1], args[2]) for args in fake.deleted}
+    assert ("aitenants", NAME) in deleted
+    assert ("gateway", NAME) in deleted
+    assert ("configmap", f"{NAME}-config") in deleted
+    # the derived tenant namespace (the controller's deterministic ai-tenant-{name})
+    # is what teardown waits on; the controller removes it with the AITenant
+    assert any(call[:3] == ("get", "namespace", TENANT_NS) for call in fake.calls)
