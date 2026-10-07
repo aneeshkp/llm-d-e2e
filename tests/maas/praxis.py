@@ -830,6 +830,17 @@ def _clear_finalizers(kubectl: Callable[..., str], kind: str, name: str, namespa
         print(f"  → could not clear finalizers on {kind}/{name}: {error}")
 
 
+def _delete(kubectl: Callable[..., str], kind: str, name: str, namespace: str) -> None:
+    """Delete without waiting: finalizer-stuck objects must never hang the subprocess.
+
+    Completion is handled by the fixture's own bounded waits (namespace gone, forced
+    cleanup); a blocking ``kubectl delete`` would instead hit the 300s subprocess
+    timeout and abort the remaining teardown steps.
+    """
+    args = ("delete", kind, name) + (("-n", namespace) if namespace else ()) + ("--ignore-not-found", "--wait=false")
+    kubectl(*args)
+
+
 def _force_tenant_cleanup(kubectl: Callable[..., str], tenant: PraxisTenant) -> None:
     """Break-glass cleanup of test-owned tenant resources when controller cleanup is stuck.
 
@@ -841,11 +852,11 @@ def _force_tenant_cleanup(kubectl: Callable[..., str], tenant: PraxisTenant) -> 
     """
     print(f"  → AITenant cleanup is stuck; forcing test-owned cleanup for {tenant.tenant_namespace}")
     _clear_finalizers(kubectl, "maastenantconfigs", TENANT_CONFIG_NAME, tenant.tenant_namespace)
-    kubectl("delete", "maastenantconfigs", TENANT_CONFIG_NAME, "-n", tenant.tenant_namespace, "--ignore-not-found")
+    _delete(kubectl, "maastenantconfigs", TENANT_CONFIG_NAME, tenant.tenant_namespace)
     _clear_finalizers(kubectl, "aitenants", tenant.aitenant_name, tenant.aitenant_namespace)
-    kubectl("delete", "namespace", tenant.tenant_namespace, "--ignore-not-found")
+    _delete(kubectl, "namespace", tenant.tenant_namespace, "")
     for kind, name, namespace in tenant_owned_shared_namespace_resources(tenant):
-        kubectl("delete", kind, name, "-n", namespace, "--ignore-not-found")
+        _delete(kubectl, kind, name, namespace)
 
 
 def _teardown(kubectl: Callable[..., str], tenant: PraxisTenant, timeout: float, poll_interval: float) -> None:
@@ -854,15 +865,13 @@ def _teardown(kubectl: Callable[..., str], tenant: PraxisTenant, timeout: float,
     The MaasTenantConfig cleanup path needs the Gateway to exist, so the bootstrap Gateway
     and its ConfigMap are deleted only after the tenant namespace is gone.
     """
-    kubectl("delete", "aitenants", tenant.aitenant_name, "-n", tenant.aitenant_namespace, "--ignore-not-found")
+    _delete(kubectl, "aitenants", tenant.aitenant_name, tenant.aitenant_namespace)
     if not _wait_namespace_gone(kubectl, tenant.tenant_namespace, timeout, poll_interval):
         _force_tenant_cleanup(kubectl, tenant)
         if not _wait_namespace_gone(kubectl, tenant.tenant_namespace, _FORCE_WAIT_SECONDS, poll_interval):
             raise RuntimeError(f"tenant namespace {tenant.tenant_namespace} still exists after forced cleanup")
-    kubectl("delete", "gateway", tenant.gateway_name, "-n", tenant.gateway_namespace, "--ignore-not-found")
-    kubectl(
-        "delete", "configmap", f"{tenant.gateway_name}-config", "-n", tenant.gateway_namespace, "--ignore-not-found"
-    )
+    _delete(kubectl, "gateway", tenant.gateway_name, tenant.gateway_namespace)
+    _delete(kubectl, "configmap", f"{tenant.gateway_name}-config", tenant.gateway_namespace)
 
 
 def _derived_tenant(name: str) -> PraxisTenant:

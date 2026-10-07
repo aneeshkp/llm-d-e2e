@@ -747,6 +747,10 @@ def test_forced_teardown_sweeps_shared_namespace_ipp_resources():
     deleted = {(args[1], args[2], args[args.index("-n") + 1]) for args in fake.deleted if "-n" in args}
     for kind, name, namespace in swept:
         assert (kind, name, namespace) in deleted
+    # every delete is issued without waiting: a finalizer-stuck object must never
+    # block the subprocess past the kubectl timeout and abort the remaining teardown
+    for args in fake.deleted:
+        assert "--wait=false" in args
 
 
 def test_rollback_best_effort_returns_a_migrating_tenant_to_legacy():
