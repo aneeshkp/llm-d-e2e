@@ -20,14 +20,24 @@ from conformance.deployer import Deployer
 from maas.phases import _declares_model_ref
 from maas.praxis import (
     PRAXIS_VALUE,
+    GATEWAY_NAMESPACE,
+    SHARED_GATEWAY_NAME,
+    SHARED_GATEWAY_SERVICE_NAME,
+    DEFAULT_TENANT_NAMESPACE,
+    TENANT_CONFIG_NAME,
     aitenant_payload_processing_type,
     create_praxis_tenant,
+    get_resource,
     has_praxis_finalizer,
     maastenantconfig,
+    migrate_tenant_to_praxis,
     payload_processing_type,
     praxis_profile_active,
+    restore_tenant_to_legacy,
     set_payload_processing_type,
     wait_for_praxis_finalizer,
+    wait_maas_api_available,
+    wait_maastenantconfig_ready,
 )
 
 # Values that must stay on the legacy payload-processing path and never attach
@@ -41,6 +51,42 @@ def _praxis_applies(tc: TestCase) -> bool:
 
 # Applied per method: a class-level mark would be inherited by every TestConformance phase.
 _for_praxis = pytest.mark.applies_when.with_args(_praxis_applies)
+
+
+def _capture_shared_state(kubectl) -> dict:
+    """Snapshot the shared gateway, its Service, and the default tenant (read-only)."""
+    gateway = get_resource(kubectl, "gateway", SHARED_GATEWAY_NAME, GATEWAY_NAMESPACE) or {}
+    service = get_resource(kubectl, "service", SHARED_GATEWAY_SERVICE_NAME, GATEWAY_NAMESPACE) or {}
+    default_tenant = get_resource(kubectl, "maastenantconfigs", TENANT_CONFIG_NAME, DEFAULT_TENANT_NAMESPACE) or {}
+    return {
+        "gateway_spec": gateway.get("spec"),
+        "gateway_uid": (gateway.get("metadata") or {}).get("uid"),
+        "service_type": (service.get("spec") or {}).get("type"),
+        "default_tenant_annotations": dict((default_tenant.get("metadata") or {}).get("annotations") or {}),
+        "default_tenant_uid": (default_tenant.get("metadata") or {}).get("uid"),
+    }
+
+
+def _assert_shared_state_unchanged(kubectl, expected: dict) -> None:
+    """Fail when anything the run must never disturb changed on the shared stack."""
+    observed = _capture_shared_state(kubectl)
+    assert observed == expected, (
+        f"shared resources changed during the Praxis phases: expected {expected!r}, observed {observed!r}"
+    )
+
+
+def _rollback_to_legacy_best_effort(kubectl, tenant) -> None:
+    """Best-effort return to the legacy path so teardown starts from a known state."""
+    try:
+        config = maastenantconfig(kubectl, tenant)
+    except RuntimeError:
+        return
+    if payload_processing_type(config) is None:
+        return
+    try:
+        restore_tenant_to_legacy(kubectl, tenant, timeout=60, poll_interval=5)
+    except (RuntimeError, TimeoutError, AssertionError) as error:
+        print(f"  → best-effort praxis rollback failed (teardown will force): {error}")
 
 
 class PraxisPhases:
@@ -79,3 +125,19 @@ class PraxisPhases:
                     f"non-praxis value {value!r} must not attach the praxis-cleanup finalizer"
                 )
                 assert aitenant_payload_processing_type(kubectl, tenant) is None
+
+    @_for_praxis
+    def test_30q_maas_praxis_legacy_ipp_roundtrip(self, deployer: Deployer, tc: TestCase):
+        """Legacy IPP ⇄ Praxis roundtrip on a test-owned tenant: handoff, readiness, rollback."""
+        kubectl = deployer.kubectl
+        shared_state = _capture_shared_state(kubectl)
+        with create_praxis_tenant(deployer) as tenant:
+            try:
+                migrate_tenant_to_praxis(kubectl, tenant)
+                wait_maastenantconfig_ready(kubectl, tenant)
+                wait_maas_api_available(kubectl, tenant)
+                restore_tenant_to_legacy(kubectl, tenant)
+            finally:
+                # keep teardown on the legacy path even when the roundtrip failed midway
+                _rollback_to_legacy_best_effort(kubectl, tenant)
+        _assert_shared_state_unchanged(kubectl, shared_state)

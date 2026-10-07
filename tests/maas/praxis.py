@@ -41,6 +41,15 @@ MAASTENANTCONFIG_CRD = "maastenantconfigs.maas.opendatahub.io"
 CONTROLLER_DEPLOYMENT = "ai-gateway-controller"
 PRAXIS_EXTPROC_IMAGE_ENV = "RELATED_IMAGE_ODH_PRAXIS_EXTPROC_IMAGE"
 
+# The chart-managed shared gateway (and istio's <gateway>-<class> Service) plus the
+# default tenant, guarded read-only by the shared-state check.
+SHARED_GATEWAY_NAME = "maas-default-gateway"
+SHARED_GATEWAY_SERVICE_NAME = "maas-default-gateway-istio"
+DEFAULT_TENANT_NAMESPACE = "models-as-a-service"
+
+# Where the tenant reconciler deploys per-tenant maas-api (chart INFRA_NAMESPACE).
+MAAS_API_INFRA_NAMESPACE = "redhat-ai-gateway-infra"
+
 # The namespace-local MaasTenantConfig generated for every AITenant.
 TENANT_CONFIG_NAME = "default-tenant"
 
@@ -51,6 +60,31 @@ CLEANUP_COMPLETE_VALUE = "cleanup-complete"
 PRAXIS_VALUE = "praxis"
 IPP_VALUE = "ipp"
 PRAXIS_CLEANUP_FINALIZER = "ai-gateway-controller.opendatahub.io/praxis-cleanup"
+
+# Per-tenant legacy IPP names in the gateway namespace (maas-controller tenantreconcile
+# constants.go, naming_test.go) and the maas-api infra names.
+LEGACY_IPP_POST_PROCESSING_NAME_BASE = "payload-processing"
+LEGACY_IPP_PRE_PROCESSING_NAME_BASE = "payload-pre-processing"
+LEGACY_IPP_PLUGINS_CONFIGMAP_NAME_BASE = "payload-processing-plugins"
+MAAS_API_NAME_BASE = "maas-api"
+MAAS_API_ROUTE_NAME_BASE = "maas-api-route"
+
+# Legacy IPP ConfigMap keys and container args (upstream praxis/constants.py).
+LEGACY_IPP_CUSTOM_CONFIG_DATA_KEY = "custom-ipp-config.yaml"
+LEGACY_IPP_CUSTOM_PRE_CONFIG_DATA_KEY = "custom-pre-processing-ipp-config.yaml"
+LEGACY_POST_PROCESSING_CONTAINER_CONFIG_ARG = "/config/custom-ipp-config.yaml"
+LEGACY_PRE_PROCESSING_CONTAINER_CONFIG_ARG = "/config/custom-pre-processing-ipp-config.yaml"
+
+# Praxis extproc ConfigMap keys and container args (ai-gateway-controller overlay).
+PRAXIS_EXTPROC_CONFIG_DATA_KEY = "extproc.yaml"
+PRAXIS_PRE_EXTPROC_CONFIG_DATA_KEY = "pre-extproc.yaml"
+PRAXIS_POST_PROCESSING_CONTAINER_CONFIG_ARG = "/etc/praxis/extproc.yaml"
+PRAXIS_PRE_PROCESSING_CONTAINER_CONFIG_ARG = "/etc/praxis/pre-extproc.yaml"
+
+# Upstream waits: legacy/bundle 300s, switch-back 600s, poll 5s.
+LEGACY_IPP_WAIT_TIMEOUT = 300
+LEGACY_IPP_SWITCH_BACK_WAIT_TIMEOUT = 600
+LEGACY_IPP_POLL_INTERVAL = 5
 
 # A persistent not-Ready detail across this many polls means the controller is stuck.
 _FAILED_POLLS = 3
@@ -144,6 +178,14 @@ def aitenant_manifest(name: str, namespace: str, gateway_name: str) -> dict:
 def _get_json(kubectl: Callable[..., str], kind: str, name: str, namespace: str = "") -> dict:
     args = ("get", kind, name) + (("-n", namespace) if namespace else ()) + ("-o", "json")
     return json.loads(kubectl(*args))
+
+
+def get_resource(kubectl: Callable[..., str], kind: str, name: str, namespace: str) -> dict | None:
+    """A resource's JSON, or ``None`` when it does not exist (shared-state guards)."""
+    try:
+        return _get_json(kubectl, kind, name, namespace)
+    except RuntimeError:
+        return None
 
 
 def _condition_true(conditions: list | None, condition_type: str) -> bool:
@@ -317,6 +359,388 @@ def wait_for_praxis_finalizer(
         time.sleep(poll_interval)
 
 
+# --- legacy IPP and Praxis bundle (gateway namespace) --------------------------
+
+
+def legacy_ipp_post_processing_name(tenant: PraxisTenant) -> str:
+    """Per-tenant legacy post-auth IPP Deployment — and EnvoyFilter — name."""
+    return f"{LEGACY_IPP_POST_PROCESSING_NAME_BASE}-{tenant.aitenant_name}"
+
+
+def legacy_ipp_pre_processing_name(tenant: PraxisTenant) -> str:
+    """Per-tenant legacy pre-auth IPP Deployment name."""
+    return f"{LEGACY_IPP_PRE_PROCESSING_NAME_BASE}-{tenant.aitenant_name}"
+
+
+def legacy_ipp_plugins_configmap_name(tenant: PraxisTenant) -> str:
+    """Per-tenant legacy IPP plugins ConfigMap name."""
+    return f"{LEGACY_IPP_PLUGINS_CONFIGMAP_NAME_BASE}-{tenant.aitenant_name}"
+
+
+def maas_api_deployment_name(tenant: PraxisTenant) -> str:
+    """Per-tenant maas-api Deployment (and Service) name in the maas-api infra namespace."""
+    return f"{MAAS_API_NAME_BASE}-{tenant.aitenant_name}"
+
+
+def maas_api_route_name(tenant: PraxisTenant) -> str:
+    """Per-tenant maas-api HTTPRoute name in the maas-api infra namespace."""
+    return f"{MAAS_API_ROUTE_NAME_BASE}-{tenant.aitenant_name}"
+
+
+def tenant_owned_shared_namespace_resources(tenant: PraxisTenant) -> list[tuple[str, str, str]]:
+    """Per-tenant resources in shared namespaces the forced teardown must sweep.
+
+    The tenant reconcilers normally delete these together with the AITenant; when
+    controller cleanup is stuck (forced teardown), they would be orphaned in the
+    gateway and maas-api infra namespaces. Every name carries the unique tenant
+    suffix, so nothing shared is ever swept.
+    """
+    return [
+        ("deployment", legacy_ipp_post_processing_name(tenant), tenant.gateway_namespace),
+        ("deployment", legacy_ipp_pre_processing_name(tenant), tenant.gateway_namespace),
+        ("envoyfilter", legacy_ipp_post_processing_name(tenant), tenant.gateway_namespace),
+        ("configmap", legacy_ipp_plugins_configmap_name(tenant), tenant.gateway_namespace),
+        ("deployment", maas_api_deployment_name(tenant), MAAS_API_INFRA_NAMESPACE),
+        ("service", maas_api_deployment_name(tenant), MAAS_API_INFRA_NAMESPACE),
+        ("httproute", maas_api_route_name(tenant), MAAS_API_INFRA_NAMESPACE),
+    ]
+
+
+def _resource_exists(kubectl: Callable[..., str], kind: str, name: str, namespace: str) -> bool:
+    return get_resource(kubectl, kind, name, namespace) is not None
+
+
+def _deployment_args(kubectl: Callable[..., str], deployment_name: str, namespace: str) -> list[str]:
+    deployment = get_resource(kubectl, "deployment", deployment_name, namespace)
+    if not deployment:
+        return []
+    args: list[str] = []
+    for container in ((deployment.get("spec") or {}).get("template") or {}).get("spec", {}).get("containers") or []:
+        args += [str(arg) for arg in container.get("args") or []]
+    return args
+
+
+def _deployment_available(kubectl: Callable[..., str], deployment_name: str, namespace: str) -> bool:
+    deployment = get_resource(kubectl, "deployment", deployment_name, namespace)
+    return bool(deployment) and _condition_true((deployment.get("status") or {}).get("conditions"), "Available")
+
+
+def plugins_configmap_data_keys(kubectl: Callable[..., str], tenant: PraxisTenant) -> set[str]:
+    """Data keys on the per-tenant plugins ConfigMap, or an empty set when absent."""
+    configmap = get_resource(kubectl, "configmap", legacy_ipp_plugins_configmap_name(tenant), tenant.gateway_namespace)
+    return set((configmap.get("data") or {}).keys()) if configmap else set()
+
+
+def maas_legacy_ipp_markers_present(kubectl: Callable[..., str], tenant: PraxisTenant) -> bool:
+    """True when the plugins ConfigMap still carries maas legacy IPP keys."""
+    return bool(
+        plugins_configmap_data_keys(kubectl, tenant)
+        & {LEGACY_IPP_CUSTOM_CONFIG_DATA_KEY, LEGACY_IPP_CUSTOM_PRE_CONFIG_DATA_KEY}
+    )
+
+
+def legacy_ipp_stack_ready(kubectl: Callable[..., str], tenant: PraxisTenant) -> bool:
+    """Full legacy IPP stack: ConfigMap keys, Deployments, EnvoyFilter, legacy container args."""
+    keys = plugins_configmap_data_keys(kubectl, tenant)
+    if not {LEGACY_IPP_CUSTOM_CONFIG_DATA_KEY, LEGACY_IPP_CUSTOM_PRE_CONFIG_DATA_KEY}.issubset(keys):
+        return False
+    if keys & {PRAXIS_EXTPROC_CONFIG_DATA_KEY, PRAXIS_PRE_EXTPROC_CONFIG_DATA_KEY}:
+        return False
+    post, pre = legacy_ipp_post_processing_name(tenant), legacy_ipp_pre_processing_name(tenant)
+    for name in (post, pre):
+        if not _resource_exists(kubectl, "deployment", name, tenant.gateway_namespace):
+            return False
+    if not _resource_exists(kubectl, "envoyfilter", post, tenant.gateway_namespace):
+        return False
+    post_args = _deployment_args(kubectl, post, tenant.gateway_namespace)
+    pre_args = _deployment_args(kubectl, pre, tenant.gateway_namespace)
+    return (
+        LEGACY_POST_PROCESSING_CONTAINER_CONFIG_ARG in post_args
+        and LEGACY_PRE_PROCESSING_CONTAINER_CONFIG_ARG in pre_args
+        and PRAXIS_POST_PROCESSING_CONTAINER_CONFIG_ARG not in post_args
+        and PRAXIS_PRE_PROCESSING_CONTAINER_CONFIG_ARG not in pre_args
+    )
+
+
+def praxis_bundle_ready(kubectl: Callable[..., str], tenant: PraxisTenant) -> bool:
+    """Praxis extproc bundle: ConfigMap keys, EnvoyFilter, and praxis container args."""
+    keys = plugins_configmap_data_keys(kubectl, tenant)
+    if not {PRAXIS_EXTPROC_CONFIG_DATA_KEY, PRAXIS_PRE_EXTPROC_CONFIG_DATA_KEY}.issubset(keys):
+        return False
+    if keys & {LEGACY_IPP_CUSTOM_CONFIG_DATA_KEY, LEGACY_IPP_CUSTOM_PRE_CONFIG_DATA_KEY}:
+        return False
+    post, pre = legacy_ipp_post_processing_name(tenant), legacy_ipp_pre_processing_name(tenant)
+    if not _resource_exists(kubectl, "envoyfilter", post, tenant.gateway_namespace):
+        return False
+    return PRAXIS_POST_PROCESSING_CONTAINER_CONFIG_ARG in _deployment_args(
+        kubectl, post, tenant.gateway_namespace
+    ) and PRAXIS_PRE_PROCESSING_CONTAINER_CONFIG_ARG in _deployment_args(kubectl, pre, tenant.gateway_namespace)
+
+
+def praxis_signals_present(kubectl: Callable[..., str], tenant: PraxisTenant) -> bool:
+    """Any praxis ConfigMap key or container arg remaining in the gateway namespace."""
+    keys = plugins_configmap_data_keys(kubectl, tenant)
+    post, pre = legacy_ipp_post_processing_name(tenant), legacy_ipp_pre_processing_name(tenant)
+    return bool(
+        keys & {PRAXIS_EXTPROC_CONFIG_DATA_KEY, PRAXIS_PRE_EXTPROC_CONFIG_DATA_KEY}
+        or PRAXIS_POST_PROCESSING_CONTAINER_CONFIG_ARG in _deployment_args(kubectl, post, tenant.gateway_namespace)
+        or PRAXIS_PRE_PROCESSING_CONTAINER_CONFIG_ARG in _deployment_args(kubectl, pre, tenant.gateway_namespace)
+    )
+
+
+def maas_ipp_handoff_complete(kubectl: Callable[..., str], tenant: PraxisTenant) -> bool:
+    """MaaS released legacy IPP: cleanup-complete status, or praxis opt-in with markers gone."""
+    config = get_resource(kubectl, "maastenantconfigs", TENANT_CONFIG_NAME, tenant.tenant_namespace)
+    if not config:
+        return False
+    annotations = (config.get("metadata") or {}).get("annotations") or {}
+    if annotations.get(PAYLOAD_PROCESSING_STATUS_ANNOTATION) == CLEANUP_COMPLETE_VALUE:
+        return True
+    if payload_processing_type(config) != PRAXIS_VALUE:
+        return False
+    return not maas_legacy_ipp_markers_present(kubectl, tenant)
+
+
+def _describe_ipp_state(kubectl: Callable[..., str], tenant: PraxisTenant) -> str:
+    """Observed IPP state for timeout diagnostics."""
+    post, pre = legacy_ipp_post_processing_name(tenant), legacy_ipp_pre_processing_name(tenant)
+    parts = [
+        f"ConfigMap/{legacy_ipp_plugins_configmap_name(tenant)} in {tenant.gateway_namespace} "
+        f"keys={sorted(plugins_configmap_data_keys(kubectl, tenant))}"
+    ]
+    for name in (post, pre):
+        available = _deployment_available(kubectl, name, tenant.gateway_namespace)
+        args = _deployment_args(kubectl, name, tenant.gateway_namespace)
+        parts.append(f"Deployment/{name} available={available} args={args}")
+    parts.append(
+        f"EnvoyFilter/{post} present={_resource_exists(kubectl, 'envoyfilter', post, tenant.gateway_namespace)}"
+    )
+    return "; ".join(parts)
+
+
+def _wait_until(
+    ready: Callable[[], bool], describe: Callable[[], str], what: str, timeout: float, poll_interval: float
+) -> None:
+    """Poll ``ready()`` until true; time out with ``describe()`` as the observed state."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if ready():
+            return
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"Timed out after {timeout:g}s waiting for {what}: observed {describe()}")
+        time.sleep(poll_interval)
+
+
+def wait_legacy_ipp_installed(
+    kubectl: Callable[..., str],
+    tenant: PraxisTenant,
+    timeout: float = LEGACY_IPP_WAIT_TIMEOUT,
+    poll_interval: float = LEGACY_IPP_POLL_INTERVAL,
+) -> None:
+    """Wait for the full legacy IPP stack and its Deployments to be Available."""
+    post, pre = legacy_ipp_post_processing_name(tenant), legacy_ipp_pre_processing_name(tenant)
+    describe = lambda: _describe_ipp_state(kubectl, tenant)  # noqa: E731
+    _wait_until(
+        lambda: legacy_ipp_stack_ready(kubectl, tenant),
+        describe,
+        f"the legacy IPP stack for {tenant.aitenant_name} in {tenant.gateway_namespace}",
+        timeout,
+        poll_interval,
+    )
+    _wait_until(
+        lambda: (
+            _deployment_available(kubectl, post, tenant.gateway_namespace)
+            and _deployment_available(kubectl, pre, tenant.gateway_namespace)
+        ),
+        describe,
+        f"legacy IPP Deployments {post} and {pre} Available in {tenant.gateway_namespace}",
+        timeout,
+        poll_interval,
+    )
+
+
+def wait_legacy_ipp_markers_absent(
+    kubectl: Callable[..., str],
+    tenant: PraxisTenant,
+    timeout: float = LEGACY_IPP_WAIT_TIMEOUT,
+    poll_interval: float = LEGACY_IPP_POLL_INTERVAL,
+) -> None:
+    """Wait until maas legacy IPP markers are gone from the plugins ConfigMap."""
+    _wait_until(
+        lambda: not maas_legacy_ipp_markers_present(kubectl, tenant),
+        lambda: _describe_ipp_state(kubectl, tenant),
+        f"removal of maas legacy IPP markers for {tenant.aitenant_name} in {tenant.gateway_namespace}",
+        timeout,
+        poll_interval,
+    )
+
+
+def wait_maas_ipp_handoff(
+    kubectl: Callable[..., str],
+    tenant: PraxisTenant,
+    timeout: float = LEGACY_IPP_WAIT_TIMEOUT,
+    poll_interval: float = LEGACY_IPP_POLL_INTERVAL,
+) -> None:
+    """Wait for MaaS to release legacy IPP before ai-gateway applies the Praxis bundle."""
+    _wait_until(
+        lambda: maas_ipp_handoff_complete(kubectl, tenant),
+        lambda: _describe_ipp_state(kubectl, tenant),
+        f"the MaaS IPP handoff for AITenant/{tenant.aitenant_name} "
+        f"({PAYLOAD_PROCESSING_STATUS_ANNOTATION}={CLEANUP_COMPLETE_VALUE} or praxis opt-in with "
+        f"legacy markers removed)",
+        timeout,
+        poll_interval,
+    )
+
+
+def wait_praxis_bundle_installed(
+    kubectl: Callable[..., str],
+    tenant: PraxisTenant,
+    timeout: float = LEGACY_IPP_WAIT_TIMEOUT,
+    poll_interval: float = LEGACY_IPP_POLL_INTERVAL,
+) -> None:
+    """Wait for the Praxis extproc bundle and its Deployments to be Available."""
+    post, pre = legacy_ipp_post_processing_name(tenant), legacy_ipp_pre_processing_name(tenant)
+    describe = lambda: _describe_ipp_state(kubectl, tenant)  # noqa: E731
+    _wait_until(
+        lambda: praxis_bundle_ready(kubectl, tenant),
+        describe,
+        f"the Praxis extproc bundle for {tenant.aitenant_name} in {tenant.gateway_namespace}",
+        timeout,
+        poll_interval,
+    )
+    _wait_until(
+        lambda: (
+            _deployment_available(kubectl, post, tenant.gateway_namespace)
+            and _deployment_available(kubectl, pre, tenant.gateway_namespace)
+        ),
+        describe,
+        f"Praxis extproc Deployments {post} and {pre} Available in {tenant.gateway_namespace}",
+        timeout,
+        poll_interval,
+    )
+
+
+def wait_praxis_signals_absent(
+    kubectl: Callable[..., str],
+    tenant: PraxisTenant,
+    timeout: float = LEGACY_IPP_SWITCH_BACK_WAIT_TIMEOUT,
+    poll_interval: float = LEGACY_IPP_POLL_INTERVAL,
+) -> None:
+    """Wait until no praxis ConfigMap keys or container args remain in the gateway namespace."""
+    _wait_until(
+        lambda: not praxis_signals_present(kubectl, tenant),
+        lambda: _describe_ipp_state(kubectl, tenant),
+        f"removal of the Praxis extproc bundle for {tenant.aitenant_name} in {tenant.gateway_namespace}",
+        timeout,
+        poll_interval,
+    )
+
+
+def wait_maastenantconfig_ready(
+    kubectl: Callable[..., str],
+    tenant: PraxisTenant,
+    timeout: float = LEGACY_IPP_WAIT_TIMEOUT,
+    poll_interval: float = LEGACY_IPP_POLL_INTERVAL,
+) -> None:
+    """Wait for MaasTenantConfig Ready, rejecting a Degraded legacy-IPP EnvoyFilter error."""
+
+    def ready() -> bool:
+        config = get_resource(kubectl, "maastenantconfigs", TENANT_CONFIG_NAME, tenant.tenant_namespace)
+        return bool(config) and _condition_true((config.get("status") or {}).get("conditions"), "Ready")
+
+    def describe() -> str:
+        config = get_resource(kubectl, "maastenantconfigs", TENANT_CONFIG_NAME, tenant.tenant_namespace) or {}
+        conditions = (config.get("status") or {}).get("conditions") or []
+        return f"MaasTenantConfig/{TENANT_CONFIG_NAME} in {tenant.tenant_namespace} conditions={json.dumps(conditions)}"
+
+    _wait_until(ready, describe, f"MaasTenantConfig/{TENANT_CONFIG_NAME} Ready", timeout, poll_interval)
+    config = maastenantconfig(kubectl, tenant)
+    for condition in (config.get("status") or {}).get("conditions") or []:
+        if condition.get("type") == "Degraded" and condition.get("status") == "True":
+            message = str(condition.get("message") or "")
+            assert "EnvoyFilter" not in message, (
+                f"MaasTenantConfig/{TENANT_CONFIG_NAME} in {tenant.tenant_namespace} is Degraded with a "
+                f"legacy IPP EnvoyFilter error: {message}"
+            )
+
+
+def wait_maas_api_available(
+    kubectl: Callable[..., str],
+    tenant: PraxisTenant,
+    timeout: float = LEGACY_IPP_WAIT_TIMEOUT,
+    poll_interval: float = LEGACY_IPP_POLL_INTERVAL,
+) -> None:
+    """Wait for the per-tenant maas-api Deployment to be Available in the infra namespace."""
+
+    def mtc_deployments_available() -> bool:
+        config = get_resource(kubectl, "maastenantconfigs", TENANT_CONFIG_NAME, tenant.tenant_namespace)
+        return bool(config) and _condition_true((config.get("status") or {}).get("conditions"), "DeploymentsAvailable")
+
+    def describe_mtc() -> str:
+        config = get_resource(kubectl, "maastenantconfigs", TENANT_CONFIG_NAME, tenant.tenant_namespace) or {}
+        conditions = (config.get("status") or {}).get("conditions") or []
+        return f"MaasTenantConfig/{TENANT_CONFIG_NAME} in {tenant.tenant_namespace} conditions={json.dumps(conditions)}"
+
+    _wait_until(
+        mtc_deployments_available,
+        describe_mtc,
+        f"MaasTenantConfig/{TENANT_CONFIG_NAME} DeploymentsAvailable",
+        timeout,
+        poll_interval,
+    )
+    deployment_name = maas_api_deployment_name(tenant)
+
+    def api_available() -> bool:
+        return _deployment_available(kubectl, deployment_name, MAAS_API_INFRA_NAMESPACE)
+
+    def describe_api() -> str:
+        deployment = get_resource(kubectl, "deployment", deployment_name, MAAS_API_INFRA_NAMESPACE) or {}
+        conditions = (deployment.get("status") or {}).get("conditions") or []
+        return f"Deployment/{deployment_name} in {MAAS_API_INFRA_NAMESPACE} conditions={json.dumps(conditions)}"
+
+    _wait_until(
+        api_available,
+        describe_api,
+        f"Deployment/{deployment_name} Available in {MAAS_API_INFRA_NAMESPACE}",
+        timeout,
+        poll_interval,
+    )
+
+
+def migrate_tenant_to_praxis(
+    kubectl: Callable[..., str],
+    tenant: PraxisTenant,
+    timeout: float = LEGACY_IPP_WAIT_TIMEOUT,
+    poll_interval: float = LEGACY_IPP_POLL_INTERVAL,
+) -> None:
+    """Move a legacy tenant to Praxis: legacy IPP in, praxis opt-in, handoff, bundle ready."""
+    wait_legacy_ipp_installed(kubectl, tenant, timeout, poll_interval)
+    set_payload_processing_type(kubectl, tenant, PRAXIS_VALUE)
+    wait_for_praxis_finalizer(kubectl, tenant, present=True, timeout=timeout, poll_interval=poll_interval)
+    wait_maas_ipp_handoff(kubectl, tenant, timeout, poll_interval)
+    wait_legacy_ipp_markers_absent(kubectl, tenant, timeout, poll_interval)
+    wait_praxis_bundle_installed(kubectl, tenant, timeout, poll_interval)
+
+
+def restore_tenant_to_legacy(
+    kubectl: Callable[..., str],
+    tenant: PraxisTenant,
+    timeout: float = LEGACY_IPP_SWITCH_BACK_WAIT_TIMEOUT,
+    poll_interval: float = LEGACY_IPP_POLL_INTERVAL,
+) -> None:
+    """Remove the praxis opt-in and wait for the legacy IPP path to return."""
+    set_payload_processing_type(kubectl, tenant, None)
+    observed = payload_processing_type(maastenantconfig(kubectl, tenant))
+    assert observed is None, (
+        f"MaasTenantConfig/{TENANT_CONFIG_NAME} in {tenant.tenant_namespace} should have no "
+        f"{PAYLOAD_PROCESSING_TYPE_ANNOTATION} annotation after rollback; got {observed!r}"
+    )
+    wait_for_praxis_finalizer(kubectl, tenant, present=False, timeout=timeout, poll_interval=poll_interval)
+    wait_praxis_signals_absent(kubectl, tenant, timeout, poll_interval)
+    wait_legacy_ipp_installed(kubectl, tenant, timeout, poll_interval)
+
+
 # --- tenant lifecycle ----------------------------------------------------------
 
 
@@ -394,13 +818,17 @@ def _force_tenant_cleanup(kubectl: Callable[..., str], tenant: PraxisTenant) -> 
 
     The generated MaasTenantConfig and AITenant keep their cleanup finalizers for as long
     as the controller cannot complete the platform reconcile; clearing them (and deleting
-    the generated namespace) is limited to resources this run created.
+    the generated namespace) is limited to resources this run created. The per-tenant IPP
+    and maas-api resources live in shared namespaces, so they are swept explicitly —
+    nothing without the unique tenant suffix is ever deleted.
     """
     print(f"  → AITenant cleanup is stuck; forcing test-owned cleanup for {tenant.tenant_namespace}")
     _clear_finalizers(kubectl, "maastenantconfigs", TENANT_CONFIG_NAME, tenant.tenant_namespace)
     kubectl("delete", "maastenantconfigs", TENANT_CONFIG_NAME, "-n", tenant.tenant_namespace, "--ignore-not-found")
     _clear_finalizers(kubectl, "aitenants", tenant.aitenant_name, tenant.aitenant_namespace)
     kubectl("delete", "namespace", tenant.tenant_namespace, "--ignore-not-found")
+    for kind, name, namespace in tenant_owned_shared_namespace_resources(tenant):
+        kubectl("delete", kind, name, "-n", namespace, "--ignore-not-found")
 
 
 def _teardown(kubectl: Callable[..., str], tenant: PraxisTenant, timeout: float, poll_interval: float) -> None:

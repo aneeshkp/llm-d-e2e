@@ -449,3 +449,352 @@ def _tenant() -> PraxisTenant:
         gateway_name=NAME,
         gateway_namespace="redhat-ods-applications",
     )
+
+
+# --- legacy IPP / Praxis bundle resource model ---------------------------------
+
+
+def test_per_tenant_legacy_ipp_and_maas_api_names():
+    tenant = _tenant()
+    assert praxis.legacy_ipp_post_processing_name(tenant) == f"payload-processing-{NAME}"
+    assert praxis.legacy_ipp_pre_processing_name(tenant) == f"payload-pre-processing-{NAME}"
+    assert praxis.legacy_ipp_plugins_configmap_name(tenant) == f"payload-processing-plugins-{NAME}"
+    assert praxis.maas_api_deployment_name(tenant) == f"maas-api-{NAME}"
+    assert praxis.maas_api_route_name(tenant) == f"maas-api-route-{NAME}"
+
+
+def test_legacy_ipp_config_keys_and_container_args_are_pinned():
+    assert praxis.LEGACY_IPP_CUSTOM_CONFIG_DATA_KEY == "custom-ipp-config.yaml"
+    assert praxis.LEGACY_IPP_CUSTOM_PRE_CONFIG_DATA_KEY == "custom-pre-processing-ipp-config.yaml"
+    assert praxis.LEGACY_POST_PROCESSING_CONTAINER_CONFIG_ARG == "/config/custom-ipp-config.yaml"
+    assert praxis.LEGACY_PRE_PROCESSING_CONTAINER_CONFIG_ARG == "/config/custom-pre-processing-ipp-config.yaml"
+
+
+def test_praxis_bundle_config_keys_and_container_args_are_pinned():
+    assert praxis.PRAXIS_EXTPROC_CONFIG_DATA_KEY == "extproc.yaml"
+    assert praxis.PRAXIS_PRE_EXTPROC_CONFIG_DATA_KEY == "pre-extproc.yaml"
+    assert praxis.PRAXIS_POST_PROCESSING_CONTAINER_CONFIG_ARG == "/etc/praxis/extproc.yaml"
+    assert praxis.PRAXIS_PRE_PROCESSING_CONTAINER_CONFIG_ARG == "/etc/praxis/pre-extproc.yaml"
+
+
+def _deployment_json(args: list[str], available: str = "True") -> str:
+    return json.dumps(
+        {
+            "spec": {"template": {"spec": {"containers": [{"name": "extproc", "args": args}]}}},
+            "status": {"conditions": _conditions(("Available", available))},
+        }
+    )
+
+
+def _serve_legacy_ipp(fake: FakeKubectl) -> None:
+    """Serve the full per-tenant legacy IPP stack in the gateway namespace."""
+    fake.serve(
+        "configmap",
+        f"payload-processing-plugins-{NAME}",
+        json.dumps(
+            {
+                "data": {
+                    "custom-ipp-config.yaml": "# maas",
+                    "custom-pre-processing-ipp-config.yaml": "# maas",
+                }
+            }
+        ),
+    )
+    fake.serve("deployment", f"payload-processing-{NAME}", _deployment_json(["/config/custom-ipp-config.yaml"]))
+    fake.serve(
+        "deployment",
+        f"payload-pre-processing-{NAME}",
+        _deployment_json(["/config/custom-pre-processing-ipp-config.yaml"]),
+    )
+    fake.serve("envoyfilter", f"payload-processing-{NAME}", json.dumps({"spec": {}}))
+
+
+def _serve_praxis_bundle(fake: FakeKubectl) -> None:
+    """Serve the per-tenant Praxis extproc bundle in the gateway namespace."""
+    fake.serve(
+        "configmap",
+        f"payload-processing-plugins-{NAME}",
+        json.dumps({"data": {"extproc.yaml": "# praxis", "pre-extproc.yaml": "# praxis"}}),
+    )
+    fake.serve("deployment", f"payload-processing-{NAME}", _deployment_json(["/etc/praxis/extproc.yaml"]))
+    fake.serve("deployment", f"payload-pre-processing-{NAME}", _deployment_json(["/etc/praxis/pre-extproc.yaml"]))
+    fake.serve("envoyfilter", f"payload-processing-{NAME}", json.dumps({"spec": {}}))
+
+
+def test_legacy_ipp_stack_ready_requires_the_full_stack():
+    tenant = _tenant()
+    fake = FakeKubectl()
+    _serve_legacy_ipp(fake)
+    assert praxis.legacy_ipp_stack_ready(fake, tenant)
+
+    incomplete = FakeKubectl()
+    _serve_legacy_ipp(incomplete)
+    incomplete.responses.pop(("envoyfilter", f"payload-processing-{NAME}"))
+    assert not praxis.legacy_ipp_stack_ready(incomplete, tenant)
+
+    mixed = FakeKubectl()
+    _serve_legacy_ipp(mixed)
+    mixed.serve(
+        "configmap",
+        f"payload-processing-plugins-{NAME}",
+        json.dumps({"data": {"custom-ipp-config.yaml": "", "extproc.yaml": ""}}),
+    )
+    assert not praxis.legacy_ipp_stack_ready(mixed, tenant)
+
+
+def test_praxis_bundle_ready_requires_keys_args_and_envoyfilter():
+    tenant = _tenant()
+    fake = FakeKubectl()
+    _serve_praxis_bundle(fake)
+    assert praxis.praxis_bundle_ready(fake, tenant)
+
+    incomplete = FakeKubectl()
+    _serve_praxis_bundle(incomplete)
+    incomplete.responses.pop(("envoyfilter", f"payload-processing-{NAME}"))
+    assert not praxis.praxis_bundle_ready(incomplete, tenant)
+
+    mixed = FakeKubectl()
+    _serve_praxis_bundle(mixed)
+    mixed.serve(
+        "configmap",
+        f"payload-processing-plugins-{NAME}",
+        json.dumps({"data": {"extproc.yaml": "", "pre-extproc.yaml": "", "custom-ipp-config.yaml": ""}}),
+    )
+    assert not praxis.praxis_bundle_ready(mixed, tenant)
+
+
+def test_maas_ipp_handoff_completes_via_status_or_released_markers():
+    tenant = _tenant()
+
+    # the controller's cleanup-complete status annotation completes the handoff on its own
+    status = FakeKubectl()
+    status.serve(
+        "maastenantconfigs",
+        "default-tenant",
+        json.dumps({"metadata": {"annotations": {praxis.PAYLOAD_PROCESSING_STATUS_ANNOTATION: "cleanup-complete"}}}),
+    )
+    assert praxis.maas_ipp_handoff_complete(status, tenant)
+
+    # praxis opt-in with the maas legacy markers released also completes it
+    released = FakeKubectl()
+    released.serve(
+        "maastenantconfigs",
+        "default-tenant",
+        json.dumps({"metadata": {"annotations": {praxis.PAYLOAD_PROCESSING_TYPE_ANNOTATION: "praxis"}}}),
+    )
+    released.serve("configmap", f"payload-processing-plugins-{NAME}", json.dumps({"data": {"extproc.yaml": ""}}))
+    assert praxis.maas_ipp_handoff_complete(released, tenant)
+
+    # legacy markers still in the gateway namespace keep the handoff incomplete
+    held = FakeKubectl()
+    held.serve(
+        "maastenantconfigs",
+        "default-tenant",
+        json.dumps({"metadata": {"annotations": {praxis.PAYLOAD_PROCESSING_TYPE_ANNOTATION: "praxis"}}}),
+    )
+    held.serve("configmap", f"payload-processing-plugins-{NAME}", json.dumps({"data": {"custom-ipp-config.yaml": ""}}))
+    assert not praxis.maas_ipp_handoff_complete(held, tenant)
+
+
+def test_wait_legacy_ipp_installed_reports_observed_state_on_timeout():
+    fake = FakeKubectl()
+    _serve_legacy_ipp(fake)
+    fake.responses.pop(("envoyfilter", f"payload-processing-{NAME}"))
+
+    with pytest.raises(TimeoutError, match=f"EnvoyFilter/payload-processing-{NAME} present=False"):
+        praxis.wait_legacy_ipp_installed(fake, _tenant(), timeout=0.2, poll_interval=0)
+
+
+def test_wait_praxis_signals_absent_reports_observed_state_on_timeout():
+    fake = FakeKubectl()
+    _serve_praxis_bundle(fake)
+
+    with pytest.raises(TimeoutError, match="/etc/praxis/extproc.yaml"):
+        praxis.wait_praxis_signals_absent(fake, _tenant(), timeout=0.2, poll_interval=0)
+
+
+def test_wait_maastenantconfig_ready_rejects_envoyfilter_degraded():
+    tenant = _tenant()
+    healthy = FakeKubectl()
+    healthy.serve(
+        "maastenantconfigs",
+        "default-tenant",
+        json.dumps(
+            {"status": {"conditions": _conditions(("Ready", "True")) + [{"type": "Degraded", "status": "False"}]}}
+        ),
+    )
+    praxis.wait_maastenantconfig_ready(healthy, tenant, timeout=0.2, poll_interval=0)
+
+    degraded = FakeKubectl()
+    degraded.serve(
+        "maastenantconfigs",
+        "default-tenant",
+        json.dumps(
+            {
+                "status": {
+                    "conditions": _conditions(("Ready", "True"))
+                    + [{"type": "Degraded", "status": "True", "message": "EnvoyFilter workload entry failed"}]
+                }
+            }
+        ),
+    )
+    with pytest.raises(AssertionError, match="EnvoyFilter"):
+        praxis.wait_maastenantconfig_ready(degraded, tenant, timeout=0.2, poll_interval=0)
+
+
+def test_wait_maas_api_available_waits_for_the_per_tenant_deployment():
+    fake = FakeKubectl()
+    fake.serve(
+        "maastenantconfigs",
+        "default-tenant",
+        json.dumps({"status": {"conditions": _conditions(("DeploymentsAvailable", "True"))}}),
+    )
+    fake.serve("deployment", f"maas-api-{NAME}", _deployment_json(["serve"]))
+
+    praxis.wait_maas_api_available(fake, _tenant(), timeout=0.2, poll_interval=0)
+
+
+def _serve_roundtrip_cluster(fake: FakeKubectl) -> None:
+    """Serve a tenant whose IPP resources follow the payload-processing-type annotation."""
+
+    def current_type() -> str | None:
+        value = None
+        for args in fake.patches:
+            patch = json.loads(args[args.index("-p") + 1])
+            annotations = (patch.get("metadata") or {}).get("annotations") or {}
+            for key, patched in annotations.items():
+                if key == praxis.PAYLOAD_PROCESSING_TYPE_ANNOTATION:
+                    value = patched
+        return value
+
+    def mtc() -> str:
+        value = current_type()
+        annotations = {praxis.PAYLOAD_PROCESSING_TYPE_ANNOTATION: value} if value else {}
+        finalizers = [praxis.PRAXIS_CLEANUP_FINALIZER] if value == praxis.PRAXIS_VALUE else []
+        return json.dumps({"metadata": {"annotations": annotations, "finalizers": finalizers}})
+
+    def plugins_configmap() -> str:
+        if current_type() == praxis.PRAXIS_VALUE:
+            data = {"extproc.yaml": "# praxis", "pre-extproc.yaml": "# praxis"}
+        else:
+            data = {"custom-ipp-config.yaml": "# maas", "custom-pre-processing-ipp-config.yaml": "# maas"}
+        return json.dumps({"data": data})
+
+    def post_deployment() -> str:
+        config_arg = (
+            praxis.PRAXIS_POST_PROCESSING_CONTAINER_CONFIG_ARG
+            if current_type() == praxis.PRAXIS_VALUE
+            else praxis.LEGACY_POST_PROCESSING_CONTAINER_CONFIG_ARG
+        )
+        return _deployment_json([config_arg])
+
+    def pre_deployment() -> str:
+        config_arg = (
+            praxis.PRAXIS_PRE_PROCESSING_CONTAINER_CONFIG_ARG
+            if current_type() == praxis.PRAXIS_VALUE
+            else praxis.LEGACY_PRE_PROCESSING_CONTAINER_CONFIG_ARG
+        )
+        return _deployment_json([config_arg])
+
+    fake.serve("maastenantconfigs", "default-tenant", mtc)
+    fake.serve("configmap", f"payload-processing-plugins-{NAME}", plugins_configmap)
+    fake.serve("deployment", f"payload-processing-{NAME}", post_deployment)
+    fake.serve("deployment", f"payload-pre-processing-{NAME}", pre_deployment)
+    fake.serve("envoyfilter", f"payload-processing-{NAME}", json.dumps({"spec": {}}))
+
+
+def test_praxis_roundtrip_orchestration():
+    fake = FakeKubectl()
+    tenant = _tenant()
+    _serve_roundtrip_cluster(fake)
+
+    praxis.migrate_tenant_to_praxis(fake, tenant, timeout=0.5, poll_interval=0)
+    assert praxis.praxis_bundle_ready(fake, tenant)
+
+    praxis.restore_tenant_to_legacy(fake, tenant, timeout=0.5, poll_interval=0)
+    assert praxis.legacy_ipp_stack_ready(fake, tenant)
+
+
+def test_sweep_list_covers_only_test_owned_shared_namespace_resources():
+    resources = praxis.tenant_owned_shared_namespace_resources(_tenant())
+    by_kind_name = {(kind, name) for kind, name, _ in resources}
+    assert ("deployment", f"payload-processing-{NAME}") in by_kind_name
+    assert ("deployment", f"payload-pre-processing-{NAME}") in by_kind_name
+    assert ("envoyfilter", f"payload-processing-{NAME}") in by_kind_name
+    assert ("configmap", f"payload-processing-plugins-{NAME}") in by_kind_name
+    assert ("deployment", f"maas-api-{NAME}") in by_kind_name
+    assert ("service", f"maas-api-{NAME}") in by_kind_name
+    assert ("httproute", f"maas-api-route-{NAME}") in by_kind_name
+    for _kind, name, namespace in resources:
+        assert NAME in name, name
+        assert namespace in (praxis.GATEWAY_NAMESPACE, praxis.MAAS_API_INFRA_NAMESPACE)
+
+
+def test_forced_teardown_sweeps_shared_namespace_ipp_resources():
+    fake = FakeKubectl()
+    _serve_cluster(fake)
+    _serve_bootstrap(fake)
+    # the tenant namespace never disappears: controller cleanup is stuck
+    fake.serve("namespace", TENANT_NS, json.dumps({"metadata": {"name": TENANT_NS}}))
+
+    with create_praxis_tenant(
+        _deployer(fake), timeout=5, poll_interval=0, run_id=RUN_ID, teardown_timeout=0.2
+    ) as tenant:
+        swept = praxis.tenant_owned_shared_namespace_resources(tenant)
+
+    deleted = {(args[1], args[2], args[args.index("-n") + 1]) for args in fake.deleted if "-n" in args}
+    for kind, name, namespace in swept:
+        assert (kind, name, namespace) in deleted
+
+
+def test_rollback_best_effort_returns_a_migrating_tenant_to_legacy():
+    from maas.praxis_phases import _rollback_to_legacy_best_effort
+
+    fake = FakeKubectl()
+    tenant = _tenant()
+    _serve_roundtrip_cluster(fake)
+    # a phase that failed mid-migration leaves praxis set
+    praxis.set_payload_processing_type(fake, tenant, praxis.PRAXIS_VALUE)
+
+    _rollback_to_legacy_best_effort(fake, tenant)
+
+    assert praxis.legacy_ipp_stack_ready(fake, tenant)
+
+
+def test_rollback_best_effort_is_a_noop_without_the_annotation():
+    from maas.praxis_phases import _rollback_to_legacy_best_effort
+
+    fake = FakeKubectl()
+    _serve_roundtrip_cluster(fake)
+
+    _rollback_to_legacy_best_effort(fake, _tenant())
+
+    assert fake.patches == []
+
+
+def test_shared_state_guard_captures_and_compares_shared_resources():
+    from maas.praxis_phases import _assert_shared_state_unchanged, _capture_shared_state
+
+    fake = FakeKubectl()
+    fake.serve(
+        "gateway",
+        "maas-default-gateway",
+        json.dumps({"metadata": {"uid": "gw-uid"}, "spec": {"gatewayClassName": "istio"}}),
+    )
+    fake.serve("service", "maas-default-gateway-istio", json.dumps({"spec": {"type": "LoadBalancer"}}))
+    fake.serve(
+        "maastenantconfigs",
+        "default-tenant",
+        json.dumps({"metadata": {"uid": "mtc-uid", "annotations": {"a": "b"}}}),
+    )
+
+    state = _capture_shared_state(fake)
+    assert state["gateway_uid"] == "gw-uid"
+    assert state["service_type"] == "LoadBalancer"
+    assert state["default_tenant_uid"] == "mtc-uid"
+
+    _assert_shared_state_unchanged(fake, state)
+
+    fake.serve("service", "maas-default-gateway-istio", json.dumps({"spec": {"type": "ClusterIP"}}))
+    with pytest.raises(AssertionError, match="shared"):
+        _assert_shared_state_unchanged(fake, state)
