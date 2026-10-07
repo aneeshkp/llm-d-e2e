@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parents[2] / "src"))
 
 from conformance.deployer import Deployer
 
+from maas import praxis
 from maas.praxis import (
     PraxisTenant,
     check_praxis_prerequisites,
@@ -198,8 +199,6 @@ def test_tenant_names_are_unique_and_dns_label_safe():
 
 
 def test_bootstrap_manifests_are_test_owned_and_clusterip():
-    from maas import praxis
-
     configmap = praxis.bootstrap_configmap_manifest(NAME, praxis.GATEWAY_NAMESPACE)
     gateway = praxis.bootstrap_gateway_manifest(NAME, praxis.GATEWAY_NAMESPACE)
     aitenant = praxis.aitenant_manifest(NAME, praxis.AITENANT_NAMESPACE, gateway_name=NAME)
@@ -362,3 +361,91 @@ def test_wait_aitenant_ready_tolerates_a_missing_tenant_config():
 
     with pytest.raises((RuntimeError, TimeoutError), match="MaasTenantConfig/default-tenant"):
         wait_aitenant_ready(fake, NAME, timeout=0.2, poll_interval=0)
+
+
+# --- payload-processing annotation contract -----------------------------------
+
+
+def test_payload_processing_type_distinguishes_absent_from_empty():
+    absent = {"metadata": {"annotations": {}}}
+    empty = {"metadata": {"annotations": {"maas.opendatahub.io/payload-processing-type": ""}}}
+    praxis_value = {"metadata": {"annotations": {"maas.opendatahub.io/payload-processing-type": "praxis"}}}
+
+    assert praxis.payload_processing_type(absent) is None
+    assert praxis.payload_processing_type(empty) == ""
+    assert praxis.payload_processing_type(praxis_value) == "praxis"
+
+
+def test_praxis_cleanup_finalizer_detection():
+    legacy = {"metadata": {"finalizers": ["maas.opendatahub.io/tenant-cleanup"]}}
+    praxis_owned = {"metadata": {"finalizers": ["ai-gateway-controller.opendatahub.io/praxis-cleanup"]}}
+
+    assert not praxis.has_praxis_finalizer(legacy)
+    assert praxis.has_praxis_finalizer(praxis_owned)
+
+
+def test_set_payload_processing_type_patches_the_exact_annotation():
+    fake = FakeKubectl()
+    tenant = PraxisTenant(
+        aitenant_name=NAME,
+        aitenant_namespace="ai-tenants",
+        tenant_namespace=TENANT_NS,
+        gateway_name=NAME,
+        gateway_namespace="redhat-ods-applications",
+    )
+
+    praxis.set_payload_processing_type(fake, tenant, "praxis")
+    praxis.set_payload_processing_type(fake, tenant, None)
+
+    assert [args[1:4] for args in fake.patches] == [
+        ("maastenantconfigs", "default-tenant", "-n"),
+        ("maastenantconfigs", "default-tenant", "-n"),
+    ]
+    patches = [json.loads(args[args.index("-p") + 1]) for args in fake.patches]
+    assert patches[0]["metadata"]["annotations"] == {"maas.opendatahub.io/payload-processing-type": "praxis"}
+    # a null value removes the annotation (kubectl merge-patch semantics)
+    assert patches[1]["metadata"]["annotations"] == {"maas.opendatahub.io/payload-processing-type": None}
+
+
+def test_wait_for_praxis_finalizer_polls_until_it_appears():
+    fake = FakeKubectl()
+    tenant = _tenant()
+    fake.serve(
+        "maastenantconfigs",
+        "default-tenant",
+        json.dumps({"metadata": {"finalizers": []}}),
+        json.dumps({"metadata": {"finalizers": ["maas.opendatahub.io/tenant-cleanup"]}}),
+        json.dumps({"metadata": {"finalizers": ["ai-gateway-controller.opendatahub.io/praxis-cleanup"]}}),
+    )
+
+    praxis.wait_for_praxis_finalizer(fake, tenant, present=True, timeout=5, poll_interval=0)
+
+
+def test_wait_for_praxis_finalizer_reports_observed_state_on_timeout():
+    fake = FakeKubectl()
+    tenant = _tenant()
+    fake.serve(
+        "maastenantconfigs",
+        "default-tenant",
+        json.dumps(
+            {
+                "metadata": {
+                    "finalizers": ["maas.opendatahub.io/tenant-cleanup"],
+                    "annotations": {"maas.opendatahub.io/payload-processing-type": "praxis"},
+                }
+            }
+        ),
+    )
+
+    with pytest.raises(TimeoutError, match="praxis-cleanup"):
+        praxis.wait_for_praxis_finalizer(fake, tenant, present=True, timeout=0.2, poll_interval=0)
+
+
+def _tenant() -> PraxisTenant:
+    return PraxisTenant(
+        aitenant_name=NAME,
+        aitenant_namespace="ai-tenants",
+        tenant_namespace=TENANT_NS,
+        gateway_name=NAME,
+        gateway_namespace="redhat-ods-applications",
+    )

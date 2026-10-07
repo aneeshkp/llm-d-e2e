@@ -64,6 +64,20 @@ def praxis_profile_enabled(profile_path: str) -> bool:
     return bool(profile_path) and Path(profile_path).name == PRAXIS_PROFILE
 
 
+_PROFILE_PATH = ""
+
+
+def set_profile_path(profile_path: str) -> None:
+    """Record the active pytest ``--profile``; called from conftest at configure time."""
+    global _PROFILE_PATH
+    _PROFILE_PATH = profile_path or ""
+
+
+def praxis_profile_active() -> bool:
+    """True when the current run selected the 3.6 MaaS profile."""
+    return praxis_profile_enabled(_PROFILE_PATH)
+
+
 def praxis_tenant_name(run_id: str) -> str:
     """Unique, DNS-label-safe AITenant name for one Praxis run."""
     return f"e2e-praxis-{run_id}"
@@ -235,6 +249,71 @@ def wait_aitenant_ready(kubectl: Callable[..., str], name: str, timeout: float, 
             raise RuntimeError(f"AITenant/{name} is not Ready: {detail}")
         if time.monotonic() >= deadline:
             raise TimeoutError(f"Timed out after {timeout:g}s waiting for AITenant/{name} Ready: {detail}")
+        time.sleep(poll_interval)
+
+
+# --- payload-processing contract -----------------------------------------------
+
+
+def payload_processing_type(config: dict) -> str | None:
+    """The payload-processing-type annotation on any object; ``None`` when the key is absent.
+
+    Distinguishes an absent annotation (legacy default) from an explicitly empty one.
+    """
+    annotations = (config.get("metadata") or {}).get("annotations") or {}
+    if PAYLOAD_PROCESSING_TYPE_ANNOTATION not in annotations:
+        return None
+    return str(annotations[PAYLOAD_PROCESSING_TYPE_ANNOTATION])
+
+
+def has_praxis_finalizer(config: dict) -> bool:
+    """True when the object carries the ai-gateway-controller praxis-cleanup finalizer."""
+    return PRAXIS_CLEANUP_FINALIZER in ((config.get("metadata") or {}).get("finalizers") or [])
+
+
+def maastenantconfig(kubectl: Callable[..., str], tenant: PraxisTenant) -> dict:
+    """The tenant's generated namespace-local MaasTenantConfig/default-tenant."""
+    return _get_json(kubectl, "maastenantconfigs", TENANT_CONFIG_NAME, tenant.tenant_namespace)
+
+
+def set_payload_processing_type(kubectl: Callable[..., str], tenant: PraxisTenant, value: str | None) -> None:
+    """Set — or remove, when ``value`` is ``None`` — the payload-processing-type annotation."""
+    patch = {"metadata": {"annotations": {PAYLOAD_PROCESSING_TYPE_ANNOTATION: value}}}
+    kubectl(
+        "patch",
+        "maastenantconfigs",
+        TENANT_CONFIG_NAME,
+        "-n",
+        tenant.tenant_namespace,
+        "--type=merge",
+        "-p",
+        json.dumps(patch),
+    )
+
+
+def aitenant_payload_processing_type(kubectl: Callable[..., str], tenant: PraxisTenant) -> str | None:
+    """The payload-processing-type annotation on the AITenant itself (must stay unset)."""
+    aitenant = _get_json(kubectl, "aitenants", tenant.aitenant_name, tenant.aitenant_namespace)
+    return payload_processing_type(aitenant)
+
+
+def wait_for_praxis_finalizer(
+    kubectl: Callable[..., str], tenant: PraxisTenant, present: bool, timeout: float = 120, poll_interval: float = 2
+) -> None:
+    """Poll until the praxis-cleanup finalizer matches ``present`` on the tenant's MaasTenantConfig."""
+    deadline = time.monotonic() + timeout
+    while True:
+        config = maastenantconfig(kubectl, tenant)
+        if has_praxis_finalizer(config) == present:
+            return
+        if time.monotonic() >= deadline:
+            metadata = config.get("metadata") or {}
+            raise TimeoutError(
+                f"Timed out after {timeout:g}s waiting for finalizer '{PRAXIS_CLEANUP_FINALIZER}' to "
+                f"{'appear on' if present else 'be removed from'} MaasTenantConfig/{TENANT_CONFIG_NAME} in "
+                f"{tenant.tenant_namespace} (annotations={json.dumps(metadata.get('annotations') or {})}, "
+                f"finalizers={json.dumps(metadata.get('finalizers') or [])})"
+            )
         time.sleep(poll_interval)
 
 
