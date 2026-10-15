@@ -1191,7 +1191,6 @@ class Deployer:
                 "--mode",
                 "random",
                 "--enable-kvcache",
-                "true",
             ]
             if lora and lora.adapters:
                 container["args"].append("--lora-modules")
