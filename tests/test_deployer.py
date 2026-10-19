@@ -1147,6 +1147,44 @@ def test_wait_for_ready_fails_fast_on_any_repeated_error(monkeypatch):
         d.wait_for_ready(tc, timeout=600, print_fn=lambda _: None)
 
 
+def test_wait_for_ready_does_not_fast_fail_while_waiting_for_gateway(monkeypatch):
+    """Gateway route acceptance can take longer than the persistent-error threshold."""
+    from conformance.deployer import Deployer
+    from conformance.config import load_testcase
+
+    d = Deployer()
+    tc = load_testcase("configs/testcases/single-gpu-smoke.yaml")
+    now = 0
+    ready_polls = 0
+
+    def fake_kubectl(*args, **kwargs):
+        nonlocal ready_polls
+        for arg in args:
+            if "status}" in str(arg) and "Ready" in str(arg) and "message" not in str(arg) and "reason" not in str(arg):
+                ready_polls += 1
+                return "False"
+            if "reason}" in str(arg):
+                return "WaitingForGateway"
+            if "message}" in str(arg):
+                return "HTTPRoute has not been accepted by a Gateway controller"
+            if "containerStatuses" in str(arg):
+                return ""
+        return ""
+
+    def fake_sleep(_):
+        nonlocal now
+        now += 1
+
+    monkeypatch.setattr(d, "kubectl", fake_kubectl)
+    monkeypatch.setattr("conformance.deployer.time.time", lambda: now)
+    monkeypatch.setattr("conformance.deployer.time.sleep", fake_sleep)
+
+    with pytest.raises(TimeoutError, match="not ready after"):
+        d.wait_for_ready(tc, timeout=3, print_fn=lambda _: None)
+
+    assert ready_polls == 3
+
+
 def test_wait_for_ready_does_not_fast_fail_on_changing_reasons(monkeypatch):
     """If the error reason/message keeps changing between polls, that
     indicates the controller is making progress -- do NOT fast-fail."""

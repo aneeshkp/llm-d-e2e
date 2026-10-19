@@ -55,7 +55,7 @@ MANAGED_LABEL = "llm-d-e2e.opendatahub.io/managed"
 
 OPERATOR_NAMESPACES = ("redhat-ods-applications", "redhat-ods-operator", "rhaii")
 _IMAGE_PULL_FAILURE_REASONS = ("ImagePullBackOff", "ErrImagePull")
-_TRANSIENT_READY_REASONS = frozenset({"MinimumReplicasUnavailable", "HTTPRoutesNotReady"})
+_TRANSIENT_READY_REASONS = frozenset({"MinimumReplicasUnavailable", "HTTPRoutesNotReady", "WaitingForGateway"})
 
 
 def _parse_node_selector(value: str) -> dict[str, str]:
