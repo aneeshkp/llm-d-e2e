@@ -11,6 +11,10 @@ Service to ``ClusterIP`` — no LoadBalancer, no public IP — mirroring upstrea
 Resource identifiers are pinned from upstream ``praxis/constants.py`` and maas-controller
 ``pkg/platform/tenantreconcile``: the payload-processing-type annotation and its ``praxis``
 /``ipp`` values, the praxis-cleanup finalizer, and the per-tenant legacy-IPP resource names.
+
+Selection contract (models-as-a-service#1579, ai-gateway-controller#91): an absent,
+``praxis``, or unrecognized payload-processing-type selects Praxis; only ``ipp`` opts the
+tenant back into maas-controller legacy IPP. A fresh AITenant therefore starts on Praxis.
 """
 
 from __future__ import annotations
@@ -60,6 +64,7 @@ TENANT_NAMESPACE_PREFIX = "ai-tenant-"
 PAYLOAD_PROCESSING_TYPE_ANNOTATION = "maas.opendatahub.io/payload-processing-type"
 PAYLOAD_PROCESSING_STATUS_ANNOTATION = "maas.opendatahub.io/payload-processing-status"
 CLEANUP_COMPLETE_VALUE = "cleanup-complete"
+STEADY_VALUE = "steady"
 PRAXIS_VALUE = "praxis"
 IPP_VALUE = "ipp"
 PRAXIS_CLEANUP_FINALIZER = "ai-gateway-controller.opendatahub.io/praxis-cleanup"
@@ -305,12 +310,20 @@ def wait_aitenant_ready(kubectl: Callable[..., str], name: str, timeout: float, 
 def payload_processing_type(config: dict) -> str | None:
     """The payload-processing-type annotation on any object; ``None`` when the key is absent.
 
-    Distinguishes an absent annotation (legacy default) from an explicitly empty one.
+    Distinguishes an absent annotation from an explicitly empty one (both select Praxis).
     """
     annotations = (config.get("metadata") or {}).get("annotations") or {}
     if PAYLOAD_PROCESSING_TYPE_ANNOTATION not in annotations:
         return None
     return str(annotations[PAYLOAD_PROCESSING_TYPE_ANNOTATION])
+
+
+def uses_praxis(config: dict) -> bool:
+    """Whether the tenant selects Praxis: everything except an explicit ``ipp`` does.
+
+    Mirrors maas-controller ``resolveSkipIPP`` and ai-gateway-controller ``UsesPraxis``.
+    """
+    return payload_processing_type(config) != IPP_VALUE
 
 
 def has_praxis_finalizer(config: dict) -> bool:
@@ -506,14 +519,14 @@ def praxis_signals_present(kubectl: Callable[..., str], tenant: PraxisTenant) ->
 
 
 def maas_ipp_handoff_complete(kubectl: Callable[..., str], tenant: PraxisTenant) -> bool:
-    """MaaS released legacy IPP: cleanup-complete status, or praxis opt-in with markers gone."""
+    """MaaS released legacy IPP: a cleanup-complete/steady status, or Praxis selected with markers gone."""
     config = get_resource(kubectl, "maastenantconfigs", TENANT_CONFIG_NAME, tenant.tenant_namespace)
     if not config:
         return False
     annotations = (config.get("metadata") or {}).get("annotations") or {}
-    if annotations.get(PAYLOAD_PROCESSING_STATUS_ANNOTATION) == CLEANUP_COMPLETE_VALUE:
+    if annotations.get(PAYLOAD_PROCESSING_STATUS_ANNOTATION) in (CLEANUP_COMPLETE_VALUE, STEADY_VALUE):
         return True
-    if payload_processing_type(config) != PRAXIS_VALUE:
+    if not uses_praxis(config):
         return False
     return not maas_legacy_ipp_markers_present(kubectl, tenant)
 
@@ -603,8 +616,8 @@ def wait_maas_ipp_handoff(
         lambda: maas_ipp_handoff_complete(kubectl, tenant),
         lambda: _describe_ipp_state(kubectl, tenant),
         f"the MaaS IPP handoff for AITenant/{tenant.aitenant_name} "
-        f"({PAYLOAD_PROCESSING_STATUS_ANNOTATION}={CLEANUP_COMPLETE_VALUE} or praxis opt-in with "
-        f"legacy markers removed)",
+        f"({PAYLOAD_PROCESSING_STATUS_ANNOTATION}={CLEANUP_COMPLETE_VALUE}/{STEADY_VALUE} or Praxis "
+        f"selected with legacy markers removed)",
         timeout,
         poll_interval,
     )
@@ -725,37 +738,46 @@ def wait_maas_api_available(
     )
 
 
-def migrate_tenant_to_praxis(
+def wait_praxis_selected(
     kubectl: Callable[..., str],
     tenant: PraxisTenant,
     timeout: float = LEGACY_IPP_WAIT_TIMEOUT,
     poll_interval: float = LEGACY_IPP_POLL_INTERVAL,
 ) -> None:
-    """Move a legacy tenant to Praxis: legacy IPP in, praxis opt-in, handoff, bundle ready."""
-    wait_legacy_ipp_installed(kubectl, tenant, timeout, poll_interval)
-    set_payload_processing_type(kubectl, tenant, PRAXIS_VALUE)
+    """Wait for a Praxis-selected tenant to settle: finalizer, MaaS handoff, Praxis bundle ready."""
     wait_for_praxis_finalizer(kubectl, tenant, present=True, timeout=timeout, poll_interval=poll_interval)
     wait_maas_ipp_handoff(kubectl, tenant, timeout, poll_interval)
     wait_legacy_ipp_markers_absent(kubectl, tenant, timeout, poll_interval)
     wait_praxis_bundle_installed(kubectl, tenant, timeout, poll_interval)
 
 
-def restore_tenant_to_legacy(
+def opt_tenant_into_ipp(
     kubectl: Callable[..., str],
     tenant: PraxisTenant,
     timeout: float = LEGACY_IPP_SWITCH_BACK_WAIT_TIMEOUT,
     poll_interval: float = LEGACY_IPP_POLL_INTERVAL,
 ) -> None:
-    """Remove the praxis opt-in and wait for the legacy IPP path to return."""
+    """Set the explicit ``ipp`` opt-out and wait for Praxis to leave and legacy IPP to return."""
+    set_payload_processing_type(kubectl, tenant, IPP_VALUE)
+    wait_for_praxis_finalizer(kubectl, tenant, present=False, timeout=timeout, poll_interval=poll_interval)
+    wait_praxis_signals_absent(kubectl, tenant, timeout, poll_interval)
+    wait_legacy_ipp_installed(kubectl, tenant, timeout, poll_interval)
+
+
+def restore_tenant_default(
+    kubectl: Callable[..., str],
+    tenant: PraxisTenant,
+    timeout: float = LEGACY_IPP_WAIT_TIMEOUT,
+    poll_interval: float = LEGACY_IPP_POLL_INTERVAL,
+) -> None:
+    """Remove the annotation and wait for the default (Praxis) path to return."""
     set_payload_processing_type(kubectl, tenant, None)
     observed = payload_processing_type(maastenantconfig(kubectl, tenant))
     assert observed is None, (
         f"MaasTenantConfig/{TENANT_CONFIG_NAME} in {tenant.tenant_namespace} should have no "
-        f"{PAYLOAD_PROCESSING_TYPE_ANNOTATION} annotation after rollback; got {observed!r}"
+        f"{PAYLOAD_PROCESSING_TYPE_ANNOTATION} annotation after restoring the default; got {observed!r}"
     )
-    wait_for_praxis_finalizer(kubectl, tenant, present=False, timeout=timeout, poll_interval=poll_interval)
-    wait_praxis_signals_absent(kubectl, tenant, timeout, poll_interval)
-    wait_legacy_ipp_installed(kubectl, tenant, timeout, poll_interval)
+    wait_praxis_selected(kubectl, tenant, timeout, poll_interval)
 
 
 # --- tenant lifecycle ----------------------------------------------------------

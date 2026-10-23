@@ -563,37 +563,39 @@ def test_praxis_bundle_ready_requires_keys_args_and_envoyfilter():
     assert not praxis.praxis_bundle_ready(mixed, tenant)
 
 
+def test_uses_praxis_selects_everything_but_explicit_ipp():
+    def config(annotations: dict) -> dict:
+        return {"metadata": {"annotations": annotations}}
+
+    key = praxis.PAYLOAD_PROCESSING_TYPE_ANNOTATION
+    assert praxis.uses_praxis(config({}))
+    assert praxis.uses_praxis(config({key: "praxis"}))
+    assert praxis.uses_praxis(config({key: "foo"}))
+    assert praxis.uses_praxis(config({key: ""}))
+    assert not praxis.uses_praxis(config({key: "ipp"}))
+
+
 def test_maas_ipp_handoff_completes_via_status_or_released_markers():
     tenant = _tenant()
 
-    # the controller's cleanup-complete status annotation completes the handoff on its own
-    status = FakeKubectl()
-    status.serve(
-        "maastenantconfigs",
-        "default-tenant",
-        json.dumps({"metadata": {"annotations": {praxis.PAYLOAD_PROCESSING_STATUS_ANNOTATION: "cleanup-complete"}}}),
-    )
-    assert praxis.maas_ipp_handoff_complete(status, tenant)
+    def handoff(annotations: dict, plugins_data: dict | None = None) -> bool:
+        fake = FakeKubectl()
+        fake.serve("maastenantconfigs", "default-tenant", json.dumps({"metadata": {"annotations": annotations}}))
+        if plugins_data is not None:
+            fake.serve("configmap", f"payload-processing-plugins-{NAME}", json.dumps({"data": plugins_data}))
+        return praxis.maas_ipp_handoff_complete(fake, tenant)
 
-    # praxis opt-in with the maas legacy markers released also completes it
-    released = FakeKubectl()
-    released.serve(
-        "maastenantconfigs",
-        "default-tenant",
-        json.dumps({"metadata": {"annotations": {praxis.PAYLOAD_PROCESSING_TYPE_ANNOTATION: "praxis"}}}),
-    )
-    released.serve("configmap", f"payload-processing-plugins-{NAME}", json.dumps({"data": {"extproc.yaml": ""}}))
-    assert praxis.maas_ipp_handoff_complete(released, tenant)
-
-    # legacy markers still in the gateway namespace keep the handoff incomplete
-    held = FakeKubectl()
-    held.serve(
-        "maastenantconfigs",
-        "default-tenant",
-        json.dumps({"metadata": {"annotations": {praxis.PAYLOAD_PROCESSING_TYPE_ANNOTATION: "praxis"}}}),
-    )
-    held.serve("configmap", f"payload-processing-plugins-{NAME}", json.dumps({"data": {"custom-ipp-config.yaml": ""}}))
-    assert not praxis.maas_ipp_handoff_complete(held, tenant)
+    status, type_key = praxis.PAYLOAD_PROCESSING_STATUS_ANNOTATION, praxis.PAYLOAD_PROCESSING_TYPE_ANNOTATION
+    # MaaS's cleanup-complete, or ai-gateway-controller's steady claim, completes it on its own
+    assert handoff({status: "cleanup-complete"})
+    assert handoff({status: "steady"})
+    # Praxis selected (absent annotation is the default) with the legacy markers released
+    assert handoff({}, {"extproc.yaml": ""})
+    assert handoff({type_key: "praxis"}, {"extproc.yaml": ""})
+    # legacy markers still in the gateway namespace keep it incomplete
+    assert not handoff({type_key: "praxis"}, {"custom-ipp-config.yaml": ""})
+    # an explicit ipp opt-out never hands off, even with no markers
+    assert not handoff({type_key: "ipp"}, {})
 
 
 def test_wait_legacy_ipp_installed_reports_observed_state_on_timeout():
@@ -667,14 +669,17 @@ def _serve_roundtrip_cluster(fake: FakeKubectl) -> None:
                     value = patched
         return value
 
+    def on_praxis() -> bool:
+        return current_type() != praxis.IPP_VALUE
+
     def mtc() -> str:
         value = current_type()
-        annotations = {praxis.PAYLOAD_PROCESSING_TYPE_ANNOTATION: value} if value else {}
-        finalizers = [praxis.PRAXIS_CLEANUP_FINALIZER] if value == praxis.PRAXIS_VALUE else []
+        annotations = {praxis.PAYLOAD_PROCESSING_TYPE_ANNOTATION: value} if value is not None else {}
+        finalizers = [praxis.PRAXIS_CLEANUP_FINALIZER] if on_praxis() else []
         return json.dumps({"metadata": {"annotations": annotations, "finalizers": finalizers}})
 
     def plugins_configmap() -> str:
-        if current_type() == praxis.PRAXIS_VALUE:
+        if on_praxis():
             data = {"extproc.yaml": "# praxis", "pre-extproc.yaml": "# praxis"}
         else:
             data = {"custom-ipp-config.yaml": "# maas", "custom-pre-processing-ipp-config.yaml": "# maas"}
@@ -683,7 +688,7 @@ def _serve_roundtrip_cluster(fake: FakeKubectl) -> None:
     def post_deployment() -> str:
         config_arg = (
             praxis.PRAXIS_POST_PROCESSING_CONTAINER_CONFIG_ARG
-            if current_type() == praxis.PRAXIS_VALUE
+            if on_praxis()
             else praxis.LEGACY_POST_PROCESSING_CONTAINER_CONFIG_ARG
         )
         return _deployment_json([config_arg])
@@ -691,7 +696,7 @@ def _serve_roundtrip_cluster(fake: FakeKubectl) -> None:
     def pre_deployment() -> str:
         config_arg = (
             praxis.PRAXIS_PRE_PROCESSING_CONTAINER_CONFIG_ARG
-            if current_type() == praxis.PRAXIS_VALUE
+            if on_praxis()
             else praxis.LEGACY_PRE_PROCESSING_CONTAINER_CONFIG_ARG
         )
         return _deployment_json([config_arg])
@@ -708,11 +713,15 @@ def test_praxis_roundtrip_orchestration():
     tenant = _tenant()
     _serve_roundtrip_cluster(fake)
 
-    praxis.migrate_tenant_to_praxis(fake, tenant, timeout=0.5, poll_interval=0)
+    # a fresh tenant is already on Praxis
+    praxis.wait_praxis_selected(fake, tenant, timeout=0.5, poll_interval=0)
     assert praxis.praxis_bundle_ready(fake, tenant)
 
-    praxis.restore_tenant_to_legacy(fake, tenant, timeout=0.5, poll_interval=0)
+    praxis.opt_tenant_into_ipp(fake, tenant, timeout=0.5, poll_interval=0)
     assert praxis.legacy_ipp_stack_ready(fake, tenant)
+
+    praxis.restore_tenant_default(fake, tenant, timeout=0.5, poll_interval=0)
+    assert praxis.praxis_bundle_ready(fake, tenant)
 
 
 def test_sweep_list_covers_only_test_owned_shared_namespace_resources():
@@ -751,31 +760,6 @@ def test_forced_teardown_sweeps_shared_namespace_ipp_resources():
     # block the subprocess past the kubectl timeout and abort the remaining teardown
     for args in fake.deleted:
         assert "--wait=false" in args
-
-
-def test_rollback_best_effort_returns_a_migrating_tenant_to_legacy():
-    from maas.praxis_phases import _rollback_to_legacy_best_effort
-
-    fake = FakeKubectl()
-    tenant = _tenant()
-    _serve_roundtrip_cluster(fake)
-    # a phase that failed mid-migration leaves praxis set
-    praxis.set_payload_processing_type(fake, tenant, praxis.PRAXIS_VALUE)
-
-    _rollback_to_legacy_best_effort(fake, tenant)
-
-    assert praxis.legacy_ipp_stack_ready(fake, tenant)
-
-
-def test_rollback_best_effort_is_a_noop_without_the_annotation():
-    from maas.praxis_phases import _rollback_to_legacy_best_effort
-
-    fake = FakeKubectl()
-    _serve_roundtrip_cluster(fake)
-
-    _rollback_to_legacy_best_effort(fake, _tenant())
-
-    assert fake.patches == []
 
 
 def test_shared_state_guard_captures_and_compares_shared_resources():
